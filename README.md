@@ -78,3 +78,7 @@ docker build \
   --build-arg SKEY_WHEEL=artifacts/skey.whl \
   .
 ```
+
+For the default Docker Compose path, the image is built and run as `linux/amd64` so
+`pip` can install the published manylinux wheels for Essentia and the other
+binary dependencies without manual intervention.

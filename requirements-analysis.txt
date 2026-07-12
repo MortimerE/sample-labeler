@@ -1,5 +1,5 @@
 # Main analyzer environment. S-KEY is installed into an isolated environment by
 # the Dockerfile because its NumPy/PyTorch requirements conflict with madmom.
-essentia>=2.1b6.dev184
+essentia==2.1b6.dev1389
 madmom @ git+https://github.com/CPJKU/madmom.git@27f032e8947204902c675e5e341a3faf5dc86dae
 

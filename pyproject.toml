@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8,<9", "pytest-cov>=5,<6"]
-analysis = ["essentia>=2.1b6.dev1110", "madmom>=0.17.dev0"]
+analysis = ["essentia==2.1b6.dev1389", "madmom>=0.17.dev0"]
 
 [project.scripts]
 autolabel = "autolabel.cli:cli"

@@ -2,7 +2,10 @@ services:
   analyzer:
     build:
       context: .
+      platforms:
+        - linux/amd64
     image: inbloom-sample-labeler:latest
+    platform: linux/amd64
     entrypoint: ["sleep", "infinity"]
     init: true
     volumes:

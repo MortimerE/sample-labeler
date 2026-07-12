@@ -1,8 +1,10 @@
 import json
+import types
 
 import numpy as np
 import soundfile as sf
 
+from autolabel import backends
 from autolabel.domain import Key
 from autolabel.pipeline import analyze_file
 from autolabel.scoring import KeyVote, TempoEvidence
@@ -45,4 +47,63 @@ def test_degenerate_input_does_not_call_models(tmp_path):
     assert record.key.status == "atonal"
     assert record.tempo.status == "tempoless"
     assert record.flags == ["SILENT_FILE"]
+
+
+def test_keyfinder_temporary_file_is_pcm16(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeWindowing:
+        def __init__(self, type):
+            self.type = type
+
+        def __call__(self, frame):
+            return frame
+
+    class FakeSpectrum:
+        def __call__(self, frame):
+            return frame
+
+    class FakeSpectralPeaks:
+        def __call__(self, spectrum):
+            return np.asarray([440.0]), np.asarray([1.0])
+
+    class FakeHPCP:
+        def __init__(self, size):
+            self.size = size
+
+        def __call__(self, frequencies, magnitudes):
+            return np.ones(self.size)
+
+    class FakeKey:
+        def __init__(self, profileType):
+            self.profileType = profileType
+
+        def __call__(self, hpcp):
+            return "C", "major", 0.9, 0.2
+
+    fake_essentia = types.SimpleNamespace(
+        Windowing=FakeWindowing,
+        Spectrum=FakeSpectrum,
+        SpectralPeaks=FakeSpectralPeaks,
+        HPCP=FakeHPCP,
+        Key=FakeKey,
+        FrameGenerator=lambda samples, frameSize, hopSize, startFromZero: [samples[:4096]],
+    )
+
+    detectors = backends.ProductionDetectors()
+    monkeypatch.setattr(detectors, "_imports", lambda: (fake_essentia, types.SimpleNamespace()))
+    monkeypatch.setattr(backends, "_profile_candidates", lambda hpcp: [(1.0, Key(0, "major")), (0.5, Key(7, "minor"))])
+    monkeypatch.setattr(backends, "parse_key", lambda tonic, mode=None: Key(0, "major"))
+    monkeypatch.setattr(backends, "_run", lambda command, backend: "[0.9, 0.1]" if backend == "S-KEY" else "C major")
+
+    def fake_write(path, samples, sample_rate, subtype):
+        captured["subtype"] = subtype
+        captured["sample_rate"] = sample_rate
+
+    monkeypatch.setattr(backends.sf, "write", fake_write)
+
+    audio = backends.AudioBuffer(np.ones(8192, dtype=np.float32), 44100, 44100, 1, 1.0, 1.0)
+    detectors.key_votes(audio)
+
+    assert captured["subtype"] == "PCM_16"
 

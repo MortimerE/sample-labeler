@@ -121,7 +121,7 @@ class ProductionDetectors:
         essentia_runner = next(candidate for _, candidate in candidates if candidate != essentia_key)
 
         with tempfile.NamedTemporaryFile(suffix=".wav") as working_file:
-            sf.write(working_file.name, audio.samples, audio.sample_rate, subtype="FLOAT")
+            sf.write(working_file.name, audio.samples, audio.sample_rate, subtype="PCM_16")
             keyfinder_name = _run(["keyfinder-cli", "-n", "standard", working_file.name], "libKeyFinder")
             if not keyfinder_name:
                 raise BackendUnavailable("libKeyFinder returned no key")
