@@ -35,12 +35,18 @@ RUN pip install --no-cache-dir "numpy>=1.26,<2" "Cython<3" "setuptools<70" \
     && pip install --no-cache-dir . \
     && pip install --no-cache-dir --no-build-isolation -r requirements-analysis.txt
 
-# S-KEY requires NumPy 2.x and PyTorch 2.7, so keep it isolated from madmom.
-RUN python -m venv /opt/skey-venv \
-    && /opt/skey-venv/bin/pip install --no-cache-dir "git+https://github.com/deezer/skey.git@${SKEY_REF}"
+# ML models are isolated in a dedicated venv (torch stack for S-KEY + Beat This).
+RUN python -m venv /opt/ml-venv \
+    && /opt/ml-venv/bin/pip install --no-cache-dir "git+https://github.com/deezer/skey.git@${SKEY_REF}" \
+    && /opt/ml-venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "torch==2.7.1" "torchaudio==2.7.1" \
+    && /opt/ml-venv/bin/pip install --no-cache-dir "beat-this==1.1.0"
 
-ENV SKEY_PYTHON=/opt/skey-venv/bin/python
+ENV SKEY_PYTHON=/opt/ml-venv/bin/python
 ENV SKEY_RUNNER=/app/scripts/skey_predict.py
+ENV BEAT_THIS_PYTHON=/opt/ml-venv/bin/python
+ENV BEAT_THIS_RUNNER=/app/scripts/beat_this_predict.py
+ENV BEAT_THIS_CHECKPOINT=final0
+ENV TEMPOCNN_GRAPH=/app/artifacts/deeptemp-k16.pb
 
 ENTRYPOINT ["autolabel"]
 

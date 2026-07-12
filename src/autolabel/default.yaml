@@ -1,11 +1,13 @@
 key:
   weights: {strength: 0.20, margin: 0.15, maxprob: 0.20, entropy: 0.10, agree: 0.25, tonalness: 0.10}
   thresholds: {atonal: 0.35, accept: 0.55}
+  essentia_margin_scale: 2.0
+  tonalness_uniform_floor: 0.25
   neighbor_floor: 0.25
   neighbor_set: [relative]
   dual_mode_output: false
 tempo:
-  weights: {essentia: 0.20, madmom: 0.20, pulse_clarity: 0.20, activation: 0.15, octagree: 0.25}
+  weights: {essentia: 0.15, tempocnn: 0.20, stability: 0.15, pulse_clarity: 0.15, activation: 0.10, octagree: 0.25}
   thresholds: {arhythmic: 0.30, accept: 0.50}
   bpm_range: [50, 200]
   relation_tolerance: 0.02

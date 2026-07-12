@@ -14,14 +14,18 @@ class FakeDetectors:
     def key_votes(self, audio):
         probs = np.full(24, 0.005)
         probs[19] = 0.885
-        return [
-            KeyVote("libkeyfinder", Key(7, "minor"), margin=0.4, runner_up=Key(10, "major")),
-            KeyVote("essentia", Key(7, "minor"), strength=0.9, margin=0.3, runner_up=Key(10, "major")),
-            KeyVote("skey", Key(7, "minor"), probabilities=tuple(probs)),
-        ]
+        return backends.KeyEvidence(
+            votes=(
+                KeyVote("libkeyfinder", Key(7, "minor"), runner_up=Key(10, "major")),
+                KeyVote("essentia", Key(7, "minor"), strength=0.9, margin=0.3, runner_up=Key(10, "major")),
+                KeyVote("skey", Key(7, "minor"), margin=0.5, runner_up=Key(10, "major"), probabilities=tuple(probs)),
+            ),
+            chroma=np.ones(12, dtype=float) / 12.0,
+            tonalness=0.9,
+        )
 
     def tempo_evidence(self, audio):
-        return TempoEvidence(((120, 0.8), (60, 0.2)), 120, 4.8, 0.9, 0.1)
+        return TempoEvidence(((120, 0.8), (60, 0.2)), 0.7, 120.0, 16, 0.9, 120, 4.8, 0.9, 0.1)
 
     def versions(self):
         return {"fake": "1"}
@@ -33,7 +37,7 @@ def test_end_to_end_record_validates_and_serializes(tmp_path):
     sf.write(path, 0.5 * np.sin(2 * np.pi * 196 * time), 44100, subtype="FLOAT")
     record = analyze_file(path, detectors=FakeDetectors())
     payload = json.loads(record.model_dump_json())
-    assert payload["schema_version"] == "1.0"
+    assert payload["schema_version"] == "1.1"
     assert payload["key"]["status"] == "detected"
     assert payload["tempo"]["status"] == "detected"
     assert payload["review_required"] is False
@@ -94,7 +98,10 @@ def test_keyfinder_temporary_file_is_pcm16(monkeypatch, tmp_path):
     monkeypatch.setattr(detectors, "_imports", lambda: (fake_essentia, types.SimpleNamespace()))
     monkeypatch.setattr(backends, "_profile_candidates", lambda hpcp: [(1.0, Key(0, "major")), (0.5, Key(7, "minor"))])
     monkeypatch.setattr(backends, "parse_key", lambda tonic, mode=None: Key(0, "major"))
-    monkeypatch.setattr(backends, "_run", lambda command, backend: "[0.9, 0.1]" if backend == "S-KEY" else "C major")
+    skey_probs = [0.001] * 24
+    skey_probs[0] = 0.7
+    skey_probs[13] = 0.2
+    monkeypatch.setattr(backends, "_run", lambda command, backend: str(skey_probs) if backend == "S-KEY" else "C major")
 
     def fake_write(path, samples, sample_rate, subtype):
         captured["subtype"] = subtype

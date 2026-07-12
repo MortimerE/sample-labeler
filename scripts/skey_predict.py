@@ -26,8 +26,8 @@ def main(audio_path: str) -> None:
     batch = waveform.to(device).unsqueeze(0)
     with torch.no_grad():
         features = crop(hcqt(batch), torch.zeros(1, device=device))
-        logits = chromanet(features).mean(dim=0)
-        probabilities = torch.softmax(logits, dim=-1)
+        probabilities = chromanet(features).mean(dim=0)
+    assert abs(float(probabilities.sum()) - 1.0) < 1e-3, "expected a probability vector from ChromaNet"
     print(json.dumps([float(value) for value in probabilities.cpu()]))
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from .backends import DetectorSuite
 from .domain import AudioBuffer, FieldResult, FileContext
-from .preprocess import chroma_and_tonalness
 from .scoring import score_key, score_tempo
 
 
@@ -15,8 +14,8 @@ class KeyEnsembleAnalyzer:
 
     def analyze(self, audio: AudioBuffer, ctx: FileContext) -> FieldResult:
         del ctx
-        chroma, tonalness = chroma_and_tonalness(audio)
-        return score_key(self.detectors.key_votes(audio), tonalness, self.config, chroma)
+        evidence = self.detectors.key_votes(audio)
+        return score_key(evidence.votes, evidence.tonalness, self.config, evidence.chroma)
 
 
 class TempoEnsembleAnalyzer:

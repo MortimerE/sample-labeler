@@ -23,14 +23,19 @@ class KeyVote:
     detector: str
     key: Key
     strength: float = 0.0
-    margin: float = 0.0
+    margin: float | None = None
     runner_up: Key | None = None
     probabilities: tuple[float, ...] | None = None
+    margin_ratio_raw: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class TempoEvidence:
-    madmom_hypotheses: tuple[tuple[float, float], ...]
+    tempocnn_hypotheses: tuple[tuple[float, float], ...]
+    tempocnn_peakedness: float
+    beat_this_bpm: float | None
+    beat_this_n_beats: int
+    beat_this_stability: float
     essentia_bpm: float
     essentia_confidence: float
     pulse_clarity: float
@@ -76,14 +81,18 @@ def score_key(votes: Sequence[KeyVote], tonalness: float, config: dict[str, Any]
     signal_votes: dict[str, Any] = {}
     for vote in votes:
         rel = relation(vote.key, vote.runner_up) if vote.runner_up else None
-        margin = clamp01(vote.margin)
-        effective = max(margin, config["neighbor_floor"]) if rel in config["neighbor_set"] else margin
-        if vote.detector in ("libkeyfinder", "essentia"):
+        margin = clamp01(vote.margin) if vote.margin is not None else None
+        effective = margin
+        if margin is not None and rel in config["neighbor_set"]:
+            effective = max(margin, config["neighbor_floor"])
+        if effective is not None:
             margin_values.append(effective)
-        relative_ambiguity |= rel == "relative" and margin < config["neighbor_floor"]
+        relative_ambiguity |= rel == "relative" and margin is not None and margin < config["neighbor_floor"]
         data: dict[str, Any] = {"key": short_name(vote.key)}
-        if vote.detector in ("libkeyfinder", "essentia"):
+        if margin is not None and effective is not None:
             data.update({"margin_raw": margin, "margin_eff": effective})
+        if vote.margin_ratio_raw is not None:
+            data["margin_ratio_raw"] = float(vote.margin_ratio_raw)
         if vote.runner_up:
             data.update({"runner_up": short_name(vote.runner_up), "neighbor_relation": rel})
         if vote.detector == "essentia":
@@ -100,7 +109,7 @@ def score_key(votes: Sequence[KeyVote], tonalness: float, config: dict[str, Any]
     agreement, has_zero_pair = key_agreement(votes)
     values = {
         "strength": clamp01(essentia.strength),
-        "margin": sum(margin_values) / len(margin_values),
+        "margin": sum(margin_values) / len(margin_values) if margin_values else 0.0,
         "maxprob": maxprob,
         "entropy": peakedness,
         "agree": agreement,
@@ -166,50 +175,85 @@ def bar_snap(bpm: float, duration_s: float, settings: dict[str, Any]) -> dict[st
 
 
 def score_tempo(evidence: TempoEvidence, active_duration_s: float, config: dict[str, Any]) -> FieldResult:
-    if not evidence.madmom_hypotheses:
-        raise ValueError("madmom must return at least one hypothesis")
     low, high = config["bpm_range"]
-    hypotheses = [(b, s) for b, s in evidence.madmom_hypotheses if low <= b <= high and s >= 0]
-    if not hypotheses:
-        raise ValueError("no madmom hypothesis inside configured BPM range")
+    hypotheses = [
+        (float(bpm), float(probability))
+        for bpm, probability in evidence.tempocnn_hypotheses
+        if low <= float(bpm) <= high and float(probability) >= 0.0
+    ]
     hypotheses.sort(key=lambda item: item[1], reverse=True)
-    mm_bpm, mm_strength = hypotheses[0]
-    relation_name, octagree = tempo_relation(mm_bpm, evidence.essentia_bpm, config["relation_tolerance"])
+    if not hypotheses:
+        raise ValueError("tempocnn must return at least one hypothesis in configured BPM range")
+
     flags: list[str] = []
-    if relation_name is None:
+    tempocnn_top_bpm, tempocnn_top_prob = hypotheses[0]
+    tempocnn_signal = 0.5 * clamp01(tempocnn_top_prob) + 0.5 * clamp01(evidence.tempocnn_peakedness)
+    essentia_norm = clamp01(evidence.essentia_confidence / config["essentia_confidence_ceiling"])
+
+    voters = [
+        ("tempocnn", tempocnn_top_bpm),
+        ("essentia", float(evidence.essentia_bpm)),
+    ]
+    beat_this_bpm = float(evidence.beat_this_bpm) if evidence.beat_this_bpm is not None else None
+    if beat_this_bpm is not None and low <= beat_this_bpm <= high:
+        voters.append(("beat_this", beat_this_bpm))
+    elif beat_this_bpm is None:
+        flags.append("BEAT_TRACKING_SPARSE")
+
+    pair_relations: list[tuple[str | None, float]] = []
+    for (_, bpm_a), (_, bpm_b) in combinations(voters, 2):
+        pair_relations.append(tempo_relation(float(bpm_a), float(bpm_b), config["relation_tolerance"]))
+    octagree = sum(credit for _, credit in pair_relations) / len(pair_relations) if pair_relations else 1.0
+    if any(credit == 0.0 for _, credit in pair_relations):
         flags.append("TEMPO_MODEL_DISAGREEMENT")
 
-    total_strength = sum(strength for _, strength in hypotheses[:5])
-    madmom_norm = clamp01(mm_strength / total_strength) if total_strength else 0.0
-    essentia_norm = clamp01(evidence.essentia_confidence / config["essentia_confidence_ceiling"])
+    pulse_score = clamp01(evidence.pulse_clarity)
+    activation_score = 1.0 - clamp01(evidence.activation_flatness)
+    stability_score = clamp01(evidence.beat_this_stability)
+
+    weights = dict(config["weights"])
+    if beat_this_bpm is None:
+        redistributed = weights["stability"]
+        weights["stability"] = 0.0
+        weights["pulse_clarity"] += redistributed
+
     values = {
         "essentia": essentia_norm,
-        "madmom": madmom_norm,
-        "pulse_clarity": clamp01(evidence.pulse_clarity),
-        "activation": 1.0 - clamp01(evidence.activation_flatness),
-        "octagree": octagree,
+        "tempocnn": tempocnn_signal,
+        "stability": stability_score,
+        "pulse_clarity": pulse_score,
+        "activation": activation_score,
+        "octagree": clamp01(octagree),
     }
-    confidence = clamp01(sum(config["weights"][name] * value for name, value in values.items()))
-    # Two independent no-pulse signals agreeing is stronger negative evidence
-    # than tempo estimators' octave-related hallucinations on sustained audio.
+    confidence = clamp01(sum(weights[name] * values[name] for name in weights))
     if evidence.pulse_clarity < 0.1 and evidence.activation_flatness > 0.9:
         confidence = min(confidence, config["thresholds"]["arhythmic"] - 1e-9)
 
-    candidates = [(mm_bpm, mm_strength)]
+    candidate_strengths: list[tuple[float, float]] = []
+    for bpm, probability in hypotheses[:3]:
+        candidate_strengths.append((float(bpm), clamp01(float(probability))))
+    if beat_this_bpm is not None and low <= beat_this_bpm <= high:
+        candidate_strengths.append((beat_this_bpm, stability_score))
     if low <= evidence.essentia_bpm <= high:
-        candidates.append((evidence.essentia_bpm, essentia_norm))
-    snap_scores = [bar_snap(bpm, active_duration_s, config["bar_snap"]) for bpm, _ in candidates]
-    winner = mm_bpm
-    top_strength = max(strength for _, strength in candidates)
-    eligible = [snap for snap, (_, strength) in zip(snap_scores, candidates) if strength >= top_strength * config["bar_snap"]["strength_ratio"]]
+        candidate_strengths.append((float(evidence.essentia_bpm), essentia_norm))
+
+    if not candidate_strengths:
+        raise ValueError("no tempo candidates available inside configured BPM range")
+    snap_scores = [bar_snap(bpm, active_duration_s, config["bar_snap"]) for bpm, _ in candidate_strengths]
+    winner = candidate_strengths[0][0]
+    top_strength = max(strength for _, strength in candidate_strengths)
+    eligible = [
+        snap
+        for snap, (_, strength) in zip(snap_scores, candidate_strengths)
+        if strength >= top_strength * config["bar_snap"]["strength_ratio"]
+    ]
     if eligible:
         best_snap = max(eligible, key=lambda item: item["score"])
         if best_snap["score"] > 0.5:
             winner = best_snap["bpm"]
         else:
             flags.append("NO_BAR_SNAP")
-    if relation_name not in (None, "1:1") and (not eligible or max(x["score"] for x in eligible) <= 0.5):
-        flags.append("TEMPO_OCTAVE_AMBIGUOUS")
+
     if evidence.pulse_clarity < 0.2:
         flags.append("LOW_PULSE_CLARITY")
 
@@ -217,19 +261,33 @@ def score_tempo(evidence: TempoEvidence, active_duration_s: float, config: dict[
     if confidence < config["thresholds"]["arhythmic"]:
         status = "tempoless"
         bpm = None
-        flags = [f for f in flags if f != "TEMPO_MODEL_DISAGREEMENT"]
+        flags = [flag for flag in flags if flag != "TEMPO_MODEL_DISAGREEMENT"]
     elif confidence < config["thresholds"]["accept"]:
         status = "review"
         flags.append("TEMPO_LOW_CONFIDENCE")
     else:
         status = "review" if "TEMPO_MODEL_DISAGREEMENT" in flags else "detected"
+
     winner_snap = next((item for item in snap_scores if item["bpm"] == winner), max(snap_scores, key=lambda item: item["score"]))
     signals = {
-        "madmom": {"hypotheses": [[float(b), float(s)] for b, s in hypotheses]},
-        "essentia": {"bpm": evidence.essentia_bpm, "confidence_raw": evidence.essentia_confidence, "confidence_norm": essentia_norm},
-        "pulse_clarity": clamp01(evidence.pulse_clarity),
+        "tempocnn": {
+            "hypotheses": [[float(bpm), float(probability)] for bpm, probability in hypotheses],
+            "maxprob": float(tempocnn_top_prob),
+            "peakedness": clamp01(evidence.tempocnn_peakedness),
+        },
+        "beat_this": {
+            "bpm": beat_this_bpm,
+            "stability": stability_score,
+            "n_beats": int(evidence.beat_this_n_beats),
+        },
+        "essentia": {
+            "bpm": float(evidence.essentia_bpm),
+            "confidence_raw": float(evidence.essentia_confidence),
+            "confidence_norm": essentia_norm,
+        },
+        "pulse_clarity": pulse_score,
         "activation_flatness": clamp01(evidence.activation_flatness),
-        "octave_relation": relation_name,
+        "octagree": clamp01(octagree),
         "bar_snap": {**winner_snap, "winner": winner},
     }
     return FieldResult(status, bpm, confidence, signals, flags)

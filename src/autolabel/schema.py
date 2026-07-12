@@ -51,7 +51,7 @@ class TempoRecord(StrictModel):
 
 
 class AnalysisRecord(StrictModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = "1.1"
     analyzed_at: datetime
     analyzer_versions: dict[str, str]
     file: FileRecord

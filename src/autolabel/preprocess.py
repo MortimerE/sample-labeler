@@ -85,21 +85,3 @@ def decode(path: str | Path, config: dict) -> tuple[AudioBuffer, FileContext, li
         mono = mono / working_peak
     audio = AudioBuffer(mono, target_rate, source_rate, channels, duration, active)
     return audio, FileContext(str(source), sha1_file(source)), flags
-
-
-def chroma_and_tonalness(audio: AudioBuffer) -> tuple[np.ndarray, float]:
-    samples = audio.samples
-    if samples.size < 2048 or not np.any(samples):
-        return np.zeros(12), 0.0
-    window = np.hanning(samples.size)
-    spectrum = np.abs(np.fft.rfft(samples * window))
-    frequencies = np.fft.rfftfreq(samples.size, 1 / audio.sample_rate)
-    valid = (frequencies >= 40) & (frequencies <= 5000) & (spectrum > 0)
-    midi = np.rint(69 + 12 * np.log2(frequencies[valid] / 440.0)).astype(int)
-    chroma = np.bincount(midi % 12, weights=spectrum[valid], minlength=12).astype(float)
-    if chroma.sum() == 0:
-        return chroma, 0.0
-    chroma /= chroma.sum()
-    geometric = float(np.exp(np.mean(np.log(np.maximum(chroma, 1e-12)))))
-    flatness = geometric / float(np.mean(chroma))
-    return chroma, max(0.0, min(1.0, 1.0 - flatness))

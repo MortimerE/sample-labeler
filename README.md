@@ -15,7 +15,7 @@ review outcomes are successful analyses rather than process errors.
 - metrical tempo reconciliation, confidence-gated bar-snap prior, pulse clarity,
   and activation-flatness evidence;
 - configurable weighted confidence and calibrated abstention decisions;
-- strict schema 1.0 validation and the requested CLI shape;
+- strict schema 1.1 validation and the requested CLI shape;
 - unit tests for scoring invariants plus end-to-end tests with deterministic
   detector doubles.
 
@@ -42,13 +42,10 @@ backend, configuration, and schema failures are non-zero.
 ## Backend packaging note
 
 The scoring pipeline uses a narrow `DetectorSuite` interface, keeping native
-dependencies out of unit tests. `ProductionDetectors` lazily integrates Essentia,
-madmom, libkeyfinder, and S-KEY. The upstream S-KEY repository currently says its
-PyPI release is forthcoming, so `requirements-analysis.txt` deliberately does not
-pretend an unpublished wheel exists. Deployment must pin a reviewed S-KEY source
-revision and the project-owned libkeyfinder binding that exposes the top two
-candidates. The Docker build fails at this boundary until those two immutable
-artifacts are supplied; it never silently drops an ensemble voter.
+dependencies out of unit tests. `ProductionDetectors` lazily integrates Essentia
+(including TempoCNN), Beat This, libkeyfinder, and S-KEY. The ML model runners are
+installed into an isolated virtual environment in the image so torch-backed
+dependencies do not interfere with the main analyzer environment.
 
 This is important for calibration: changing a detector build changes the evidence
 distribution and invalidates tuned confidence thresholds.
@@ -69,15 +66,6 @@ melodic loops, vocals, one-shots, drums, and atmospheres. Tune on a train split,
 freeze configuration, then report the four-way confusion matrix and acceptance
 criteria on a held-out split. Synthetic correctness tests do not substitute for
 that calibration set.
-
-The production image additionally requires immutable wheel inputs:
-
-```bash
-docker build \
-  --build-arg LIBKEYFINDER_WHEEL=artifacts/libkeyfinder.whl \
-  --build-arg SKEY_WHEEL=artifacts/skey.whl \
-  .
-```
 
 For the default Docker Compose path, the image is built and run as `linux/amd64` so
 `pip` can install the published manylinux wheels for Essentia and the other

@@ -24,7 +24,10 @@ def _degenerate(flags: list[str]) -> tuple[FieldResult, FieldResult]:
 def analyze_file(path: str | Path, config_path: str | Path | None = None, detectors: DetectorSuite | None = None) -> AnalysisRecord:
     config = load_config(config_path)
     audio, context, file_flags = decode(path, config["preprocess"])
-    suite = detectors or ProductionDetectors()
+    suite = detectors or ProductionDetectors(
+        essentia_margin_scale=float(config["key"].get("essentia_margin_scale", 2.0)),
+        tonalness_uniform_floor=float(config["key"].get("tonalness_uniform_floor", 0.25)),
+    )
     if "SILENT_FILE" in file_flags or "SHORT_FILE" in file_flags:
         key_result, tempo_result = _degenerate(file_flags)
     else:
@@ -38,7 +41,7 @@ def analyze_file(path: str | Path, config_path: str | Path | None = None, detect
     try:
         versions = suite.versions()
     except BackendUnavailable:
-        versions = {name: "unavailable" for name in ("libkeyfinder", "essentia", "madmom", "skey")}
+        versions = {name: "unavailable" for name in ("libkeyfinder", "essentia", "skey", "beat_this", "tempocnn")}
     versions = {"pipeline": __version__, **versions}
     all_field_flags = [*key_result.flags, *tempo_result.flags]
     return AnalysisRecord.model_validate({
