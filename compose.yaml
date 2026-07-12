@@ -1,0 +1,11 @@
+services:
+  analyzer:
+    build:
+      context: .
+    image: inbloom-sample-labeler:latest
+    entrypoint: ["sleep", "infinity"]
+    init: true
+    volumes:
+      - ./inputs:/inputs:ro
+      - ./results:/results
+

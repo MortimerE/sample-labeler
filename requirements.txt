@@ -1,6 +1,7 @@
 click>=8.1,<9
-numpy>=1.26,<3
+numpy>=1.26,<2
 pydantic>=2.7,<3
 PyYAML>=6,<7
 scipy>=1.12,<2
 soundfile>=0.12,<1
+
