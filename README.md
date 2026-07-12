@@ -67,6 +67,33 @@ freeze configuration, then report the four-way confusion matrix and acceptance
 criteria on a held-out split. Synthetic correctness tests do not substitute for
 that calibration set.
 
-For the default Docker Compose path, the image is built and run as `linux/amd64` so
-`pip` can install the published manylinux wheels for Essentia and the other
-binary dependencies without manual intervention.
+## Reproducible model packaging
+
+The production image contains every model needed for offline analysis. Model
+downloads happen only during `docker build`, and the build verifies these pins:
+
+- S-KEY commit: `918b83d273568d5041569bb8068843d19a335726`
+- Beat This: `1.1.0`; `final0` checkpoint from
+  `https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt`,
+  SHA-256 `8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331`
+- TempoCNN graph `https://essentia.upf.edu/models/tempo/tempocnn/deeptemp-k16-3.pb`, SHA-256
+  `21c328332a221695dd6e8572728c617373064df882e8f81da6d88dc3a821e3b3`
+- TempoCNN metadata `https://essentia.upf.edu/models/tempo/tempocnn/deeptemp-k16-3.json`, SHA-256
+  `c0c62a52aa4a05f197208133906775c1e87077a520cdec53598b67ea9d625998`
+
+The image records all artifact hashes in `/app/artifacts/SHA256SUMS`, and output
+records identify TempoCNN with a digest-qualified version. Verify a fresh image
+without network access using:
+
+```bash
+docker run --rm --network=none \
+  -v "$PWD/inputs:/inputs:ro" \
+  inbloom-sample-labeler:latest analyze "/inputs/100 Am.wav" >/dev/null
+```
+
+The default Docker Compose path remains `linux/amd64`: the pinned
+`essentia-tensorflow==2.1b6.dev1389` release publishes x86-64 Linux wheels but no
+Linux aarch64 wheel. On ARM hosts Docker therefore uses emulation. Remove the
+compose platform pin once the pinned Essentia dependency has Linux aarch64
+wheel support; building Essentia and TensorFlow from source is outside this
+milestone.

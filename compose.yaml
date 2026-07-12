@@ -1,5 +1,8 @@
 services:
   analyzer:
+    # essentia-tensorflow 2.1b6.dev1389 has no Linux aarch64 wheel. Keep the
+    # analyzer on amd64 until upstream publishes one; source-building TF is out
+    # of scope. Cross-architecture runs use Docker's emulation on ARM hosts.
     build:
       context: .
       platforms:
@@ -11,4 +14,3 @@ services:
     volumes:
       - ./inputs:/inputs:ro
       - ./results:/results
-

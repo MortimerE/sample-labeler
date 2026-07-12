@@ -95,13 +95,17 @@ def test_keyfinder_temporary_file_is_pcm16(monkeypatch, tmp_path):
     )
 
     detectors = backends.ProductionDetectors()
-    monkeypatch.setattr(detectors, "_imports", lambda: (fake_essentia, types.SimpleNamespace()))
+    monkeypatch.setattr(backends.ProductionDetectors, "_imports", lambda self: fake_essentia)
     monkeypatch.setattr(backends, "_profile_candidates", lambda hpcp: [(1.0, Key(0, "major")), (0.5, Key(7, "minor"))])
     monkeypatch.setattr(backends, "parse_key", lambda tonic, mode=None: Key(0, "major"))
     skey_probs = [0.001] * 24
     skey_probs[0] = 0.7
     skey_probs[13] = 0.2
-    monkeypatch.setattr(backends, "_run", lambda command, backend: str(skey_probs) if backend == "S-KEY" else "C major")
+    monkeypatch.setattr(
+        backends,
+        "_run",
+        lambda command, backend: json.dumps(skey_probs) if backend == "S-KEY" else "C major",
+    )
 
     def fake_write(path, samples, sample_rate, subtype):
         captured["subtype"] = subtype
@@ -110,7 +114,8 @@ def test_keyfinder_temporary_file_is_pcm16(monkeypatch, tmp_path):
     monkeypatch.setattr(backends.sf, "write", fake_write)
 
     audio = backends.AudioBuffer(np.ones(8192, dtype=np.float32), 44100, 44100, 1, 1.0, 1.0)
-    detectors.key_votes(audio)
+    evidence = detectors.key_votes(audio)
 
     assert captured["subtype"] == "PCM_16"
-
+    assert len(evidence.votes) == 3
+    assert evidence.votes[0].margin is None

@@ -40,6 +40,7 @@ class TempoEvidence:
     essentia_confidence: float
     pulse_clarity: float
     activation_flatness: float
+    flags: tuple[str, ...] = ()
 
 
 def clamp01(value: float) -> float:
@@ -182,23 +183,28 @@ def score_tempo(evidence: TempoEvidence, active_duration_s: float, config: dict[
         if low <= float(bpm) <= high and float(probability) >= 0.0
     ]
     hypotheses.sort(key=lambda item: item[1], reverse=True)
-    if not hypotheses:
-        raise ValueError("tempocnn must return at least one hypothesis in configured BPM range")
 
-    flags: list[str] = []
-    tempocnn_top_bpm, tempocnn_top_prob = hypotheses[0]
-    tempocnn_signal = 0.5 * clamp01(tempocnn_top_prob) + 0.5 * clamp01(evidence.tempocnn_peakedness)
+    flags = list(evidence.flags)
+    tempocnn_top_bpm: float | None = None
+    tempocnn_top_prob: float | None = None
+    tempocnn_signal = 0.0
+    if hypotheses:
+        tempocnn_top_bpm, tempocnn_top_prob = hypotheses[0]
+        tempocnn_signal = 0.5 * clamp01(tempocnn_top_prob) + 0.5 * clamp01(evidence.tempocnn_peakedness)
     essentia_norm = clamp01(evidence.essentia_confidence / config["essentia_confidence_ceiling"])
 
-    voters = [
-        ("tempocnn", tempocnn_top_bpm),
-        ("essentia", float(evidence.essentia_bpm)),
-    ]
+    voters: list[tuple[str, float]] = []
+    if tempocnn_top_bpm is not None:
+        voters.append(("tempocnn", tempocnn_top_bpm))
+    if low <= evidence.essentia_bpm <= high:
+        voters.append(("essentia", float(evidence.essentia_bpm)))
     beat_this_bpm = float(evidence.beat_this_bpm) if evidence.beat_this_bpm is not None else None
     if beat_this_bpm is not None and low <= beat_this_bpm <= high:
         voters.append(("beat_this", beat_this_bpm))
     elif beat_this_bpm is None:
         flags.append("BEAT_TRACKING_SPARSE")
+    if not voters:
+        raise ValueError("no tempo voters available inside configured BPM range")
 
     pair_relations: list[tuple[str | None, float]] = []
     for (_, bpm_a), (_, bpm_b) in combinations(voters, 2):
@@ -216,6 +222,12 @@ def score_tempo(evidence: TempoEvidence, active_duration_s: float, config: dict[
         redistributed = weights["stability"]
         weights["stability"] = 0.0
         weights["pulse_clarity"] += redistributed
+    if not hypotheses:
+        weights["tempocnn"] = 0.0
+        remaining_total = sum(weights.values())
+        if remaining_total <= 0:
+            raise ValueError("no tempo scoring weights remain after excluding unavailable voters")
+        weights = {name: weight / remaining_total for name, weight in weights.items()}
 
     values = {
         "essentia": essentia_norm,
@@ -272,7 +284,7 @@ def score_tempo(evidence: TempoEvidence, active_duration_s: float, config: dict[
     signals = {
         "tempocnn": {
             "hypotheses": [[float(bpm), float(probability)] for bpm, probability in hypotheses],
-            "maxprob": float(tempocnn_top_prob),
+            "maxprob": float(tempocnn_top_prob) if tempocnn_top_prob is not None else None,
             "peakedness": clamp01(evidence.tempocnn_peakedness),
         },
         "beat_this": {

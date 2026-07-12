@@ -1,10 +1,12 @@
+import json
+
 import pytest
 import numpy as np
 
 from autolabel.backends import (
     _normalize_essentia_margin,
     _profile_candidates,
-    _tempocnn_index_to_bpm,
+    _tempocnn_labels,
     _tonalness_from_hpcp,
 )
 from autolabel.domain import Key
@@ -65,8 +67,17 @@ def test_essentia_margin_ratio_normalization():
     assert _normalize_essentia_margin(3.0, 2.0) == pytest.approx(1.0)
 
 
-def test_tempocnn_index_to_bpm_linear_mapping():
-    assert _tempocnn_index_to_bpm(0) == pytest.approx(30.0)
-    assert _tempocnn_index_to_bpm(127) == pytest.approx(157.0)
-    assert _tempocnn_index_to_bpm(255) == pytest.approx(285.0)
-
+def test_tempocnn_mapping_is_loaded_from_metadata(tmp_path):
+    metadata_path = tmp_path / "tempo.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "description": "The first index represents 30 BPM.",
+                "schema": {"outputs": [{"shape": [256]}]},
+            }
+        )
+    )
+    labels = _tempocnn_labels(str(metadata_path))
+    assert labels[0] == pytest.approx(30.0)
+    assert labels[127] == pytest.approx(157.0)
+    assert labels[255] == pytest.approx(285.0)

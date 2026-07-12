@@ -109,6 +109,15 @@ def test_sparse_beat_tracking_flags_and_redistributes_weight():
     assert result.signals["beat_this"]["n_beats"] == 3
 
 
+def test_degenerate_tempocnn_is_excluded_and_flagged():
+    evidence = TempoEvidence((), 0.0, 100.0, 20, 0.9, 100, 4.0, 0.7, 0.2, ("TEMPOCNN_DEGENERATE",))
+    result = score_tempo(evidence, 12.0, tempo_config())
+    assert "TEMPOCNN_DEGENERATE" in result.flags
+    assert result.signals["tempocnn"]["hypotheses"] == []
+    assert result.signals["tempocnn"]["maxprob"] is None
+    assert result.signals["octagree"] == 1.0
+
+
 def test_skey_distribution_preserves_maxprob_and_peakedness_signal():
     probs = np.full(24, 0.2 / 22)
     probs[19] = 0.6

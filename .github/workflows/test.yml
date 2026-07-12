@@ -13,4 +13,14 @@ jobs:
           cache: pip
       - run: pip install -e '.[test]'
       - run: pytest --cov=autolabel --cov-report=term-missing
-
+  container-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: python scripts/generate_smoke_wav.py /tmp/sample-labeler-smoke.wav
+      - run: docker build -t inbloom-sample-labeler:latest .
+      - run: >-
+          docker run --rm --network=none
+          -v /tmp/sample-labeler-smoke.wav:/inputs/smoke.wav:ro
+          inbloom-sample-labeler:latest analyze /inputs/smoke.wav >/dev/null

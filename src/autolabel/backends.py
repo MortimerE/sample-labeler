@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import lru_cache
 from importlib import import_module
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -111,6 +116,57 @@ def _run(command: list[str], backend: str) -> str:
     return process.stdout.strip()
 
 
+def _last_json_line(stdout: str, backend: str) -> object:
+    for line in reversed(stdout.strip().splitlines()):
+        line = line.strip()
+        if line.startswith(("{", "[")):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    raise BackendUnavailable(f"{backend} produced no parseable JSON line")
+
+
+@lru_cache(maxsize=None)
+def _tempocnn_labels(metadata_path: str) -> tuple[float, ...]:
+    try:
+        metadata = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+        class_count = int(metadata["schema"]["outputs"][0]["shape"][0])
+        description = str(metadata["description"])
+        first_match = re.search(r"first index represents.*?([0-9]+(?:\.[0-9]+)?)\s*BPM", description)
+        if first_match is None:
+            raise ValueError("missing first-index BPM")
+        first_bpm = float(first_match.group(1))
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise BackendUnavailable(f"invalid TempoCNN metadata at {metadata_path}: {error}") from error
+    labels = tuple(first_bpm + index for index in range(class_count))
+    if any(label != 30.0 + index for index, label in enumerate(labels)):
+        raise BackendUnavailable("TempoCNN metadata does not match the expected 30 BPM class offset")
+    return labels
+
+
+def _artifact_digest(graph_path: str, sums_path: str) -> str:
+    graph_name = Path(graph_path).name
+    try:
+        if not Path(graph_path).is_file():
+            raise FileNotFoundError(graph_path)
+        lines = Path(sums_path).read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise BackendUnavailable(f"TempoCNN artifact integrity metadata is unavailable: {error}") from error
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2 and Path(parts[-1].lstrip("*")).name == graph_name:
+            digest = parts[0].lower()
+            if re.fullmatch(r"[0-9a-f]{64}", digest):
+                actual = hashlib.sha256(Path(graph_path).read_bytes()).hexdigest()
+                if actual != digest:
+                    raise BackendUnavailable(
+                        f"TempoCNN checksum mismatch for {graph_path}: expected {digest}, got {actual}"
+                    )
+                return digest
+    raise BackendUnavailable(f"TempoCNN digest for {graph_name} not found in {sums_path}")
+
+
 @dataclass(slots=True)
 class ProductionDetectors:
     """Container-backed adapters for Essentia, Beat This, libKeyFinder, and S-KEY."""
@@ -150,15 +206,21 @@ class ProductionDetectors:
 
         with tempfile.NamedTemporaryFile(suffix=".wav") as working_file:
             sf.write(working_file.name, audio.samples, audio.sample_rate, subtype="PCM_16")
-            keyfinder_name = _run(["keyfinder-cli", "-n", "standard", working_file.name], "libKeyFinder")
+            keyfinder_command = ["keyfinder-cli", "-n", "standard", working_file.name]
+            skey_python = os.environ.get("SKEY_PYTHON", "/opt/ml-venv/bin/python")
+            skey_runner = os.environ.get("SKEY_RUNNER", "/app/scripts/skey_predict.py")
+            skey_command = [skey_python, skey_runner, working_file.name]
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                keyfinder_future = executor.submit(_run, keyfinder_command, "libKeyFinder")
+                skey_future = executor.submit(_run, skey_command, "S-KEY")
+                keyfinder_name = keyfinder_future.result()
+                skey_stdout = skey_future.result()
             if not keyfinder_name:
                 raise BackendUnavailable("libKeyFinder returned no key")
             keyfinder_key = parse_key(keyfinder_name)
-            skey_python = os.environ.get("SKEY_PYTHON", "/opt/skey-venv/bin/python")
-            skey_runner = os.environ.get("SKEY_RUNNER", "/app/scripts/skey_predict.py")
-            raw_probabilities = json.loads(_run([skey_python, skey_runner, working_file.name], "S-KEY").splitlines()[-1])
+            raw_probabilities = _last_json_line(skey_stdout, "S-KEY")
 
-        if len(raw_probabilities) != 24:
+        if not isinstance(raw_probabilities, list) or len(raw_probabilities) != 24:
             raise BackendUnavailable("S-KEY must return 24 class probabilities")
         probabilities = np.zeros(24, dtype=float)
         for probability, key in zip(raw_probabilities, _SKEY_KEYS):
@@ -200,46 +262,57 @@ class ProductionDetectors:
 
     def tempo_evidence(self, audio: AudioBuffer) -> TempoEvidence:
         essentia = self._imports()
-        tempocnn_graph = os.environ.get("TEMPOCNN_GRAPH", "/app/artifacts/deeptemp-k16.pb")
-        bpm, _, confidence, _, _ = essentia.RhythmExtractor2013(method="multifeature")(audio.samples)
-
-        hypotheses: tuple[tuple[float, float], ...]
-        tempocnn_peakedness: float
-        if os.path.exists(tempocnn_graph):
-            resampled = essentia.Resample(inputSampleRate=audio.sample_rate, outputSampleRate=11025)(audio.samples)
-            predictions = essentia.TensorflowPredictTempoCNN(graphFilename=tempocnn_graph)(resampled)
-            distribution = np.asarray(predictions, dtype=float)
-            if distribution.ndim == 0:
-                distribution = distribution.reshape(1)
-            if distribution.ndim > 1:
-                distribution = distribution.reshape(-1, distribution.shape[-1]).mean(axis=0)
-            distribution = np.maximum(distribution, 0.0)
-            if distribution.sum() > 0:
-                distribution /= distribution.sum()
-                order = np.argsort(distribution)[::-1]
-                hypotheses = tuple(
-                    (float(_tempocnn_index_to_bpm(index)), float(distribution[index]))
-                    for index in order[:5]
-                )
-                entropy = -np.sum(distribution * np.log(np.maximum(distribution, 1e-12)))
-                tempocnn_peakedness = 1.0 - float(entropy / np.log(len(distribution)))
-            else:
-                hypotheses = ((float(bpm), 1.0),)
-                tempocnn_peakedness = 0.0
-        else:
-            hypotheses = ((float(bpm), 1.0),)
-            tempocnn_peakedness = 0.0
+        tempocnn_graph = os.environ.get("TEMPOCNN_GRAPH", "/app/artifacts/deeptemp-k16-3.pb")
+        tempocnn_metadata = os.environ.get("TEMPOCNN_METADATA", "/app/artifacts/deeptemp-k16-3.json")
+        if not os.path.isfile(tempocnn_graph):
+            raise BackendUnavailable(f"TempoCNN graph not found at {tempocnn_graph}; rebuild the image")
 
         beat_this_python = os.environ.get("BEAT_THIS_PYTHON", "/opt/ml-venv/bin/python")
         beat_this_runner = os.environ.get("BEAT_THIS_RUNNER", "/app/scripts/beat_this_predict.py")
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".wav") as beat_this_file:
-                sf.write(beat_this_file.name, audio.samples, audio.sample_rate, subtype="PCM_16")
-                beat_this_output = json.loads(
-                    _run([beat_this_python, beat_this_runner, "--audio", beat_this_file.name], "Beat This")
+        with tempfile.NamedTemporaryFile(suffix=".wav") as beat_this_file:
+            sf.write(beat_this_file.name, audio.samples, audio.sample_rate, subtype="PCM_16")
+            beat_this_command = [beat_this_python, beat_this_runner, "--audio", beat_this_file.name]
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                rhythm_future = executor.submit(
+                    essentia.RhythmExtractor2013(method="multifeature"), audio.samples
                 )
-        except BackendUnavailable:
-            beat_this_output = {"beats": [], "activations_stats": {"flatness": 1.0}}
+                beat_this_future = executor.submit(_run, beat_this_command, "Beat This")
+                bpm, _, confidence, _, _ = rhythm_future.result()
+                beat_this_stdout = beat_this_future.result()
+
+        beat_this_output = _last_json_line(beat_this_stdout, "Beat This")
+        if not isinstance(beat_this_output, dict):
+            raise BackendUnavailable("Beat This must return a JSON object")
+
+        hypotheses: tuple[tuple[float, float], ...]
+        tempocnn_peakedness: float
+        flags: list[str] = []
+        labels = _tempocnn_labels(tempocnn_metadata)
+        resampled = essentia.Resample(inputSampleRate=audio.sample_rate, outputSampleRate=11025)(audio.samples)
+        predictions = essentia.TensorflowPredictTempoCNN(graphFilename=tempocnn_graph)(resampled)
+        distribution = np.asarray(predictions, dtype=float)
+        if distribution.ndim == 0:
+            distribution = distribution.reshape(1)
+        if distribution.ndim > 1:
+            distribution = distribution.reshape(-1, distribution.shape[-1]).mean(axis=0)
+        distribution = np.maximum(distribution, 0.0)
+        if distribution.size != len(labels):
+            raise BackendUnavailable(
+                f"TempoCNN returned {distribution.size} classes; metadata declares {len(labels)}"
+            )
+        if distribution.sum() > 0:
+            distribution /= distribution.sum()
+            order = np.argsort(distribution)[::-1]
+            hypotheses = tuple(
+                (float(labels[index]), float(distribution[index]))
+                for index in order[:5]
+            )
+            entropy = -np.sum(distribution * np.log(np.maximum(distribution, 1e-12)))
+            tempocnn_peakedness = 1.0 - float(entropy / np.log(len(distribution)))
+        else:
+            hypotheses = ()
+            tempocnn_peakedness = 0.0
+            flags.append("TEMPOCNN_DEGENERATE")
         beats = np.asarray(beat_this_output.get("beats", []), dtype=float)
         beat_this_n_beats = int(beats.size)
         beat_this_bpm: float | None = None
@@ -268,22 +341,21 @@ class ProductionDetectors:
             float(confidence),
             _pulse_clarity(audio.samples, audio.sample_rate),
             activation_flatness,
+            tuple(flags),
         )
 
     def versions(self) -> dict[str, str]:
         essentia = self._imports()
+        graph_path = os.environ.get("TEMPOCNN_GRAPH", "/app/artifacts/deeptemp-k16-3.pb")
+        sums_path = os.environ.get("MODEL_SHA256SUMS", "/app/artifacts/SHA256SUMS")
+        tempocnn_digest = _artifact_digest(graph_path, sums_path)
         return {
             "essentia": _version(essentia),
             "libkeyfinder": os.environ.get("LIBKEYFINDER_VERSION", "2.2.8"),
             "skey": os.environ.get("SKEY_VERSION", "0.1.0"),
-            "beat_this": os.environ.get("BEAT_THIS_VERSION", "unknown"),
-            "tempocnn": os.path.basename(os.environ.get("TEMPOCNN_GRAPH", "/app/artifacts/deeptemp-k16.pb")),
+            "beat_this": os.environ.get("BEAT_THIS_VERSION", "1.1.0"),
+            "tempocnn": f"{Path(graph_path).stem}@{tempocnn_digest[:12]}",
         }
-
-
-def _tempocnn_index_to_bpm(index: int) -> float:
-    # Essentia TempoCNN classes are 30..285 BPM (256 classes).
-    return float(30 + int(index))
 
 
 def _pulse_clarity(samples: np.ndarray, sample_rate: int) -> float:
@@ -313,4 +385,3 @@ def _pulse_clarity(samples: np.ndarray, sample_rate: int) -> float:
     if correlation[0] <= 0 or max_lag <= min_lag:
         return 0.0
     return max(0.0, min(1.0, float(np.max(correlation[min_lag:max_lag]) / correlation[0])))
-
