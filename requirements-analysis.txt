@@ -1,0 +1,7 @@
+# Known-good Linux environment. libkeyfinder and S-KEY are installed from their
+# upstream build artifacts in deployment because neither offers stable PyPI wheels.
+essentia==2.1b6.dev1110
+madmom @ git+https://github.com/CPJKU/madmom.git@27f032e8947204902c675e5e341a3faf740e5971
+# libkeyfinder @ <organization-controlled wheel URL>#sha256=<pinned digest>
+# skey @ <organization-controlled wheel URL>#sha256=<pinned digest>
+

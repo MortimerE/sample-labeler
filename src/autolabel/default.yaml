@@ -1,0 +1,19 @@
+key:
+  weights: {strength: 0.20, margin: 0.15, maxprob: 0.20, entropy: 0.10, agree: 0.25, tonalness: 0.10}
+  thresholds: {atonal: 0.35, accept: 0.55}
+  neighbor_floor: 0.25
+  neighbor_set: [relative]
+  dual_mode_output: false
+tempo:
+  weights: {essentia: 0.20, madmom: 0.20, pulse_clarity: 0.20, activation: 0.15, octagree: 0.25}
+  thresholds: {arhythmic: 0.30, accept: 0.50}
+  bpm_range: [50, 200]
+  relation_tolerance: 0.02
+  essentia_confidence_ceiling: 5.32
+  bar_snap: {sigma: 0.05, strength_ratio: 0.8, beats_per_bar: [4, 3]}
+preprocess:
+  sample_rate: 44100
+  trim_db: -45
+  trim_hysteresis_ms: 100
+  min_duration_s: 0.3
+
