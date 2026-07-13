@@ -40,6 +40,7 @@ class FieldResult:
     status: Status
     value: Any | None
     confidence: float
+    top_k: list[dict[str, Any]]
     signals: dict[str, Any]
     flags: list[str] = field(default_factory=list)
 
@@ -48,4 +49,3 @@ class Analyzer(Protocol):
     field: str
 
     def analyze(self, audio: AudioBuffer, ctx: FileContext) -> FieldResult: ...
-

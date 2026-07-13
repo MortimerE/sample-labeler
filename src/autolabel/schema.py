@@ -34,10 +34,23 @@ class DualKeyValue(StrictModel):
     display: str
 
 
+class KeyCandidate(StrictModel):
+    tonic: str
+    mode: Literal["major", "minor"]
+    camelot: str
+    p: float = Field(ge=0, le=1)
+
+
+class TempoCandidate(StrictModel):
+    bpm: float = Field(gt=0)
+    p: float = Field(ge=0, le=1)
+
+
 class KeyRecord(StrictModel):
     status: Literal["detected", "atonal", "review"]
     value: KeyValue | DualKeyValue | None
     confidence: float = Field(ge=0, le=1)
+    top_k: list[KeyCandidate]
     signals: dict[str, Any]
     flags: list[str]
 
@@ -46,12 +59,13 @@ class TempoRecord(StrictModel):
     status: Literal["detected", "tempoless", "review"]
     bpm: float | None = Field(default=None, gt=0)
     confidence: float = Field(ge=0, le=1)
+    top_k: list[TempoCandidate]
     signals: dict[str, Any]
     flags: list[str]
 
 
 class AnalysisRecord(StrictModel):
-    schema_version: Literal["1.1"] = "1.1"
+    schema_version: Literal["1.2"] = "1.2"
     analyzed_at: datetime
     analyzer_versions: dict[str, str]
     file: FileRecord
@@ -59,4 +73,3 @@ class AnalysisRecord(StrictModel):
     tempo: TempoRecord
     review_required: bool
     flags: list[str]
-

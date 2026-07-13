@@ -1,21 +1,58 @@
 key:
-  weights: {strength: 0.20, margin: 0.15, maxprob: 0.20, entropy: 0.10, agree: 0.25, tonalness: 0.10}
-  thresholds: {atonal: 0.35, accept: 0.55}
   essentia_margin_scale: 2.0
   tonalness_uniform_floor: 0.25
-  neighbor_floor: 0.25
-  neighbor_set: [relative]
   dual_mode_output: false
 tempo:
-  weights: {essentia: 0.15, tempocnn: 0.20, stability: 0.15, pulse_clarity: 0.15, activation: 0.10, octagree: 0.25}
-  thresholds: {arhythmic: 0.30, accept: 0.50}
   bpm_range: [50, 200]
   relation_tolerance: 0.02
-  essentia_confidence_ceiling: 5.32
-  bar_snap: {sigma: 0.05, strength_ratio: 0.8, beats_per_bar: [4, 3]}
+  essentia_confidence_ceiling: 3.5
+  bar_snap: {sigma: 0.05, beats_per_bar: [4, 3]}
+fusion:
+  key:
+    kernel: {exact: 1.0, relative: 0.55, parallel: 0.45, fifth: 0.35, floor: 0.02}
+    runner_mix: {lambda_base: 0.3, libkeyfinder_lambda: 0.2}
+    skey_temperature: 1.0
+    skey_tiled_discount: 0.5
+    reliability: {skey: 1.0, essentia: 1.0, libkeyfinder: 0.7}
+    bass_root:
+      enabled: true
+      reliability: 0.9
+      kernel: {tonic: 1.0, fifth: 0.45, scale: 0.15, floor: 0.02}
+      lowpass_hz: 200
+      f0_range: [30, 200]
+      voicing_threshold: 0.7
+      energy_floor: 0.05
+      min_note_s: 0.22
+      stability_cents: 35
+      gate: {sub_prominence: 0.5, sub_coverage: 0.15, min_segments: 2}
+      downbeat: {boost: 2.0, window_ms: 90, wait_ms: 400}
+    detect: {p1: 0.50, p1_related: 0.35, p12_related: 0.60, dual_gap: 0.15}
+  tempo:
+    grid: {low: 40, high: 220, points: 1200}
+    sigma: {tempocnn: 0.008, essentia_base: 0.005, essentia_spread: 0.03, beat_this_base: 0.01, beat_this_spread: 0.04}
+    folding: {octave: 0.3, threehalves: 0.25, triple: 0.15}
+    octave_decision: {mass_ratio: 0.2, margin: 0.15, ioi_tolerance: 0.12}
+    reliability: {tempocnn: 1.0, essentia: 1.0, beat_this: 0.8}
+    snap_eta: 0.25
+    lobe_separation: 0.06
+    detect: {m1: 0.50, m1_related: 0.35, m12_related: 0.60}
+  background: {k_short: 1.0, min_full_evidence_s: 4.0}
+axes:
+  tonality:
+    weights: {harmonic_ratio: 0.35, tonalness_h: 0.25, coherent_mass: 0.25, strength: 0.15}
+    atonal: 0.30
+  rhythmicity:
+    weights: {pulse_clarity: 0.3, activation: 0.25, stability: 0.15, concentration: 0.30}
+    arhythmic: 0.30
+skey:
+  min_seconds: 3.75
+report:
+  top_k: 3
+reporting:
+  essentia_substitution_pct: 0.003
+  integer_snap_pct: 0.004
 preprocess:
   sample_rate: 44100
   trim_db: -45
   trim_hysteresis_ms: 100
   min_duration_s: 0.3
-

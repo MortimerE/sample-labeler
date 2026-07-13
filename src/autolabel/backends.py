@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from pathlib import Path
-from typing import Protocol
+from threading import Event
+from typing import Any, Protocol
 
 import numpy as np
 import soundfile as sf
+from scipy.signal import butter, find_peaks, istft, medfilt2d, sosfiltfilt, stft
 
 from .domain import AudioBuffer, Key
 from .scoring import KeyVote, TempoEvidence
@@ -29,6 +32,20 @@ class KeyEvidence:
     votes: tuple[KeyVote, ...]
     chroma: np.ndarray
     tonalness: float
+    flags: tuple[str, ...] = ()
+    harmonic_ratio: float = 0.0
+    bass_root_histogram: tuple[float, ...] | None = None
+    sub_prominence: float = 0.0
+    sub_coverage: float = 0.0
+    bass_segments: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class BassRootEvidence:
+    histogram: tuple[float, ...] | None
+    sub_prominence: float
+    sub_coverage: float
+    segments: int
 
 
 class DetectorSuite(Protocol):
@@ -101,8 +118,171 @@ def _tonalness_from_hpcp(hpcp: np.ndarray, uniform_floor: float) -> tuple[np.nda
     return chroma, tonalness
 
 
+def _odd_kernel(target: int, limit: int) -> int:
+    value = min(max(1, int(target)), max(1, int(limit)))
+    if value % 2 == 0:
+        value = max(1, value - 1)
+    return value
+
+
+def _harmonic_component(samples: np.ndarray, sample_rate: int) -> tuple[np.ndarray, float]:
+    if samples.size < 64:
+        return samples.astype(np.float32, copy=True), 0.0
+    frame_size = min(4096, samples.size)
+    hop_size = min(512, max(1, frame_size // 4))
+    _, _, spectrum = stft(
+        samples,
+        fs=sample_rate,
+        nperseg=frame_size,
+        noverlap=frame_size - hop_size,
+        boundary="zeros",
+    )
+    magnitude = np.abs(spectrum)
+    time_kernel = _odd_kernel(round(0.35 * sample_rate / hop_size), magnitude.shape[1])
+    bin_hz = sample_rate / frame_size
+    frequency_kernel = _odd_kernel(round(500.0 / bin_hz), magnitude.shape[0])
+    harmonic_smooth = medfilt2d(magnitude, kernel_size=(1, time_kernel))
+    percussive_smooth = medfilt2d(magnitude, kernel_size=(frequency_kernel, 1))
+    harmonic_power = np.square(harmonic_smooth)
+    percussive_power = np.square(percussive_smooth)
+    harmonic_mask = harmonic_power / np.maximum(harmonic_power + percussive_power, 1e-12)
+    harmonic_spectrum = spectrum * harmonic_mask
+    harmonic_energy = float(harmonic_power.sum())
+    percussive_energy = float(percussive_power.sum())
+    _, harmonic = istft(
+        harmonic_spectrum,
+        fs=sample_rate,
+        nperseg=frame_size,
+        noverlap=frame_size - hop_size,
+        input_onesided=True,
+        boundary=True,
+    )
+    if harmonic.size < samples.size:
+        harmonic = np.pad(harmonic, (0, samples.size - harmonic.size))
+    return harmonic[: samples.size].astype(np.float32), clamp01(
+        harmonic_energy / max(harmonic_energy + percussive_energy, 1e-12)
+    )
+
+
+def clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _bass_root_histogram(
+    samples: np.ndarray,
+    sample_rate: int,
+    active_duration_s: float,
+    config: dict,
+    downbeats: tuple[float, ...] = (),
+) -> BassRootEvidence:
+    if not config.get("enabled", True) or samples.size < 4096:
+        return BassRootEvidence(None, 0.0, 0.0, 0)
+    cutoff = min(float(config["lowpass_hz"]), sample_rate * 0.45)
+    low = sosfiltfilt(butter(4, cutoff, btype="lowpass", fs=sample_rate, output="sos"), samples)
+    frame_size = 4096
+    hop_size = 1024
+    low_hz, high_hz = map(float, config["f0_range"])
+    min_lag = max(1, int(sample_rate / high_hz))
+    max_lag = min(frame_size - 1, int(sample_rate / low_hz))
+    full_reference = float(np.sqrt(np.mean(np.square(samples.astype(float)))))
+    records: list[tuple[int, float, float]] = []
+    window = np.hanning(frame_size)
+    for offset in range(0, samples.size - frame_size + 1, hop_size):
+        low_frame = low[offset : offset + frame_size]
+        full_frame = samples[offset : offset + frame_size]
+        low_rms = float(np.sqrt(np.mean(np.square(low_frame))))
+        full_rms = float(np.sqrt(np.mean(np.square(full_frame))))
+        if low_rms < float(config.get("energy_floor", 0.05)) * max(full_reference, 1e-9):
+            continue
+        if low_rms / max(full_rms, 1e-9) < float(config.get("energy_floor", 0.05)):
+            continue
+        centered = (low_frame - np.mean(low_frame)) * window
+        fft_size = 1 << (2 * frame_size - 1).bit_length()
+        transformed = np.fft.rfft(centered, n=fft_size)
+        autocorrelation = np.fft.irfft(np.square(np.abs(transformed)), n=fft_size)[:frame_size]
+        if autocorrelation[0] <= 0:
+            continue
+        search = autocorrelation[min_lag : max_lag + 1]
+        lag = min_lag + int(np.argmax(search))
+        left_energy = float(np.dot(centered[:-lag], centered[:-lag]))
+        right_energy = float(np.dot(centered[lag:], centered[lag:]))
+        peak = float(autocorrelation[lag] / max(math.sqrt(left_energy * right_energy), 1e-12))
+        if peak >= float(config["voicing_threshold"]):
+            records.append((offset, sample_rate / lag, low_rms))
+
+    raw_segments: list[list[tuple[int, float, float]]] = []
+    for record in records:
+        if not raw_segments:
+            raw_segments.append([record])
+            continue
+        previous = raw_segments[-1][-1]
+        median_f0 = float(np.median([item[1] for item in raw_segments[-1]]))
+        cents = abs(1200.0 * math.log2(record[1] / median_f0))
+        # Bridge brief ACF dropouts inside a sustained note; the stability test
+        # still prevents kick sweeps or successive notes from merging.
+        if record[0] - previous[0] <= 12 * hop_size and cents <= float(config["stability_cents"]):
+            raw_segments[-1].append(record)
+        else:
+            raw_segments.append([record])
+
+    histogram = np.zeros(12, dtype=float)
+    kept_ranges: list[tuple[int, int]] = []
+    downbeat_window = float(config["downbeat"]["window_ms"]) / 1000.0
+    kept = 0
+    for segment in raw_segments:
+        start = segment[0][0]
+        end = segment[-1][0] + frame_size
+        duration = (end - start) / sample_rate
+        f0s = np.asarray([item[1] for item in segment])
+        median_f0 = float(np.median(f0s))
+        stability = np.max(np.abs(1200.0 * np.log2(f0s / median_f0))) if f0s.size else float("inf")
+        if duration < float(config["min_note_s"]) or stability > float(config["stability_cents"]):
+            continue
+        pitch_class = int(round(69 + 12 * math.log2(median_f0 / 440.0))) % 12
+        weight = duration * float(np.mean([item[2] for item in segment]))
+        onset_s = start / sample_rate
+        if any(abs(onset_s - downbeat) <= downbeat_window for downbeat in downbeats):
+            weight *= float(config["downbeat"]["boost"])
+        histogram[pitch_class] += weight
+        kept_ranges.append((start, min(end, low.size)))
+        kept += 1
+
+    total_low_energy = float(np.square(low).sum())
+    kept_energy = sum(float(np.square(low[start:end]).sum()) for start, end in kept_ranges)
+    sub_prominence = clamp01(kept_energy / max(total_low_energy, 1e-12))
+    kept_time = sum((end - start) / sample_rate for start, end in kept_ranges)
+    sub_coverage = clamp01(kept_time / max(active_duration_s, 1e-9))
+    gate = config["gate"]
+    passes = (
+        kept >= int(gate["min_segments"])
+        and sub_prominence >= float(gate["sub_prominence"])
+        and sub_coverage >= float(gate["sub_coverage"])
+        and histogram.sum() > 0
+    )
+    normalized = tuple(float(value) for value in histogram / histogram.sum()) if passes else None
+    return BassRootEvidence(normalized, sub_prominence, sub_coverage, kept)
+
+
 def _normalize_essentia_margin(relative_strength: float, scale: float) -> float:
     return max(0.0, min(1.0, (float(relative_strength) - 1.0) / max(float(scale), 1e-9)))
+
+
+def _beat_grid_evidence(beats: np.ndarray) -> tuple[float | None, float]:
+    """Estimate tempo without bias from frame-quantized median intervals."""
+    intervals = np.diff(np.asarray(beats, dtype=float))
+    intervals = intervals[intervals > 0]
+    if intervals.size == 0:
+        return None, 0.0
+    median_interval = float(np.median(intervals))
+    if median_interval <= 0:
+        return None, 0.0
+    inliers = intervals[np.abs(intervals - median_interval) <= 0.25 * median_interval]
+    if inliers.size == 0:
+        return None, 0.0
+    mean_interval = float(np.mean(inliers))
+    iqr = float(np.percentile(inliers, 75) - np.percentile(inliers, 25))
+    stability = 1.0 - clamp01(iqr / max(mean_interval, 1e-9))
+    return 60.0 / mean_interval, stability
 
 
 def _run(command: list[str], backend: str) -> str:
@@ -173,6 +353,10 @@ class ProductionDetectors:
 
     essentia_margin_scale: float = 2.0
     tonalness_uniform_floor: float = 0.25
+    skey_min_seconds: float = 3.75
+    bass_root_config: dict[str, Any] | None = None
+    _downbeats_ready: Event = field(default_factory=Event, init=False, repr=False)
+    _downbeats: tuple[float, ...] = field(default=(), init=False, repr=False)
 
     def _imports(self) -> object:
         try:
@@ -184,12 +368,13 @@ class ProductionDetectors:
 
     def key_votes(self, audio: AudioBuffer) -> KeyEvidence:
         essentia = self._imports()
+        harmonic_samples, harmonic_ratio = _harmonic_component(audio.samples, audio.sample_rate)
         window = essentia.Windowing(type="blackmanharris62")
         spectrum = essentia.Spectrum()
         peaks = essentia.SpectralPeaks()
         hpcp_algorithm = essentia.HPCP(size=12)
         frames = []
-        for frame in essentia.FrameGenerator(audio.samples, frameSize=4096, hopSize=2048, startFromZero=True):
+        for frame in essentia.FrameGenerator(harmonic_samples, frameSize=4096, hopSize=2048, startFromZero=True):
             frequencies, magnitudes = peaks(spectrum(window(frame)))
             frames.append(hpcp_algorithm(frequencies, magnitudes))
         if not frames:
@@ -209,38 +394,65 @@ class ProductionDetectors:
             keyfinder_command = ["keyfinder-cli", "-n", "standard", working_file.name]
             skey_python = os.environ.get("SKEY_PYTHON", "/opt/ml-venv/bin/python")
             skey_runner = os.environ.get("SKEY_RUNNER", "/app/scripts/skey_predict.py")
-            skey_command = [skey_python, skey_runner, working_file.name]
+            skey_command = [
+                skey_python,
+                skey_runner,
+                "--min-seconds",
+                str(self.skey_min_seconds),
+                working_file.name,
+            ]
             with ThreadPoolExecutor(max_workers=2) as executor:
                 keyfinder_future = executor.submit(_run, keyfinder_command, "libKeyFinder")
                 skey_future = executor.submit(_run, skey_command, "S-KEY")
                 keyfinder_name = keyfinder_future.result()
-                skey_stdout = skey_future.result()
+                try:
+                    skey_stdout = skey_future.result()
+                except BackendUnavailable:
+                    skey_stdout = None
             if not keyfinder_name:
                 raise BackendUnavailable("libKeyFinder returned no key")
             keyfinder_key = parse_key(keyfinder_name)
-            raw_probabilities = _last_json_line(skey_stdout, "S-KEY")
-
-        if not isinstance(raw_probabilities, list) or len(raw_probabilities) != 24:
-            raise BackendUnavailable("S-KEY must return 24 class probabilities")
-        probabilities = np.zeros(24, dtype=float)
-        for probability, key in zip(raw_probabilities, _SKEY_KEYS):
-            offset = 0 if key.mode == "major" else 12
-            probabilities[offset + key.pitch_class] = float(probability)
-        skey_order = np.argsort(probabilities)[::-1]
-        skey_index = int(skey_order[0])
-        skey_runner_index = int(skey_order[1])
-        skey_key = Key(skey_index % 12, "major" if skey_index < 12 else "minor")
-        skey_runner = Key(skey_runner_index % 12, "major" if skey_runner_index < 12 else "minor")
-        skey_margin = max(0.0, float(probabilities[skey_index] - probabilities[skey_runner_index]))
+        flags: list[str] = []
+        skey_vote: KeyVote | None = None
+        if skey_stdout is None:
+            flags.append("SKEY_UNAVAILABLE")
+        else:
+            try:
+                payload = _last_json_line(skey_stdout, "S-KEY")
+                if isinstance(payload, dict):
+                    raw_probabilities = payload.get("probabilities")
+                    if payload.get("tiled") is True:
+                        flags.append("SKEY_INPUT_TILED")
+                else:
+                    raw_probabilities = payload
+                if not isinstance(raw_probabilities, list) or len(raw_probabilities) != 24:
+                    raise BackendUnavailable("S-KEY must return 24 class probabilities")
+                probabilities = np.zeros(24, dtype=float)
+                for probability, key in zip(raw_probabilities, _SKEY_KEYS):
+                    offset = 0 if key.mode == "major" else 12
+                    probabilities[offset + key.pitch_class] = float(probability)
+                skey_order = np.argsort(probabilities)[::-1]
+                skey_index = int(skey_order[0])
+                skey_runner_index = int(skey_order[1])
+                skey_key = Key(skey_index % 12, "major" if skey_index < 12 else "minor")
+                skey_runner = Key(skey_runner_index % 12, "major" if skey_runner_index < 12 else "minor")
+                skey_vote = KeyVote(
+                    "skey",
+                    skey_key,
+                    margin=max(0.0, float(probabilities[skey_index] - probabilities[skey_runner_index])),
+                    runner_up=skey_runner,
+                    probabilities=tuple(float(value) for value in probabilities),
+                )
+            except (BackendUnavailable, TypeError, ValueError):
+                flags.append("SKEY_UNAVAILABLE")
 
         _, keyfinder_runner = next(
             (score, candidate) for score, candidate in candidates if candidate != keyfinder_key
         )
 
-        return KeyEvidence(
-            votes=(
-                KeyVote("libkeyfinder", keyfinder_key, runner_up=keyfinder_runner),
-                KeyVote(
+        votes = [
+            KeyVote("libkeyfinder", keyfinder_key, runner_up=keyfinder_runner),
+            KeyVote(
                     "essentia",
                     essentia_key,
                     strength=float(strength),
@@ -248,16 +460,30 @@ class ProductionDetectors:
                     runner_up=essentia_runner,
                     margin_ratio_raw=float(relative_strength),
                 ),
-                KeyVote(
-                    "skey",
-                    skey_key,
-                    margin=skey_margin,
-                    runner_up=skey_runner,
-                    probabilities=tuple(float(value) for value in probabilities),
-                ),
-            ),
+        ]
+        if skey_vote is not None:
+            votes.append(skey_vote)
+        bass = BassRootEvidence(None, 0.0, 0.0, 0)
+        if self.bass_root_config is not None:
+            wait_seconds = float(self.bass_root_config["downbeat"]["wait_ms"]) / 1000.0
+            self._downbeats_ready.wait(wait_seconds)
+            bass = _bass_root_histogram(
+                audio.samples,
+                audio.sample_rate,
+                audio.active_duration_s,
+                self.bass_root_config,
+                self._downbeats,
+            )
+        return KeyEvidence(
+            votes=tuple(votes),
             chroma=chroma,
             tonalness=tonalness,
+            flags=tuple(dict.fromkeys(flags)),
+            harmonic_ratio=harmonic_ratio,
+            bass_root_histogram=bass.histogram,
+            sub_prominence=bass.sub_prominence,
+            sub_coverage=bass.sub_coverage,
+            bass_segments=bass.segments,
         )
 
     def tempo_evidence(self, audio: AudioBuffer) -> TempoEvidence:
@@ -283,6 +509,9 @@ class ProductionDetectors:
         beat_this_output = _last_json_line(beat_this_stdout, "Beat This")
         if not isinstance(beat_this_output, dict):
             raise BackendUnavailable("Beat This must return a JSON object")
+        downbeats = tuple(float(value) for value in beat_this_output.get("downbeats", []))
+        self._downbeats = downbeats
+        self._downbeats_ready.set()
 
         hypotheses: tuple[tuple[float, float], ...]
         tempocnn_peakedness: float
@@ -296,11 +525,15 @@ class ProductionDetectors:
         if distribution.ndim > 1:
             distribution = distribution.reshape(-1, distribution.shape[-1]).mean(axis=0)
         distribution = np.maximum(distribution, 0.0)
-        if distribution.size != len(labels):
+        if distribution.size == 0 or distribution.sum() <= 0:
+            hypotheses = ()
+            tempocnn_peakedness = 0.0
+            flags.append("TEMPOCNN_DEGENERATE")
+        elif distribution.size != len(labels):
             raise BackendUnavailable(
                 f"TempoCNN returned {distribution.size} classes; metadata declares {len(labels)}"
             )
-        if distribution.sum() > 0:
+        else:
             distribution /= distribution.sum()
             order = np.argsort(distribution)[::-1]
             hypotheses = tuple(
@@ -309,28 +542,17 @@ class ProductionDetectors:
             )
             entropy = -np.sum(distribution * np.log(np.maximum(distribution, 1e-12)))
             tempocnn_peakedness = 1.0 - float(entropy / np.log(len(distribution)))
-        else:
-            hypotheses = ()
-            tempocnn_peakedness = 0.0
-            flags.append("TEMPOCNN_DEGENERATE")
         beats = np.asarray(beat_this_output.get("beats", []), dtype=float)
         beat_this_n_beats = int(beats.size)
-        beat_this_bpm: float | None = None
-        beat_this_stability = 0.0
-        if beat_this_n_beats >= 4:
-            intervals = np.diff(beats)
-            intervals = intervals[intervals > 0]
-            if intervals.size > 0:
-                median_interval = float(np.median(intervals))
-                if median_interval > 0:
-                    beat_this_bpm = 60.0 / median_interval
-                    iqr = float(np.percentile(intervals, 75) - np.percentile(intervals, 25))
-                    beat_this_stability = 1.0 - max(0.0, min(1.0, iqr / median_interval))
+        beat_this_bpm, beat_this_stability = (
+            _beat_grid_evidence(beats) if beat_this_n_beats >= 4 else (None, 0.0)
+        )
 
         activation_flatness = float(
             beat_this_output.get("activations_stats", {}).get("flatness", 1.0 - beat_this_stability)
         )
 
+        pulse_clarity, onset_events = _pulse_evidence(audio.samples, audio.sample_rate)
         return TempoEvidence(
             hypotheses,
             tempocnn_peakedness,
@@ -339,9 +561,11 @@ class ProductionDetectors:
             beat_this_stability,
             float(bpm),
             float(confidence),
-            _pulse_clarity(audio.samples, audio.sample_rate),
+            pulse_clarity,
             activation_flatness,
             tuple(flags),
+            downbeats,
+            onset_events,
         )
 
     def versions(self) -> dict[str, str]:
@@ -358,11 +582,11 @@ class ProductionDetectors:
         }
 
 
-def _pulse_clarity(samples: np.ndarray, sample_rate: int) -> float:
+def _pulse_evidence(samples: np.ndarray, sample_rate: int) -> tuple[float, tuple[float, ...]]:
     hop = 512
     frame = 1024
     if len(samples) < frame * 2:
-        return 0.0
+        return 0.0, ()
 
     window = np.hanning(frame).astype(float)
     frames = []
@@ -371,11 +595,14 @@ def _pulse_clarity(samples: np.ndarray, sample_rate: int) -> float:
         magnitude = np.abs(np.fft.rfft(segment))
         frames.append(np.log1p(magnitude))
     if len(frames) < 4:
-        return 0.0
+        return 0.0, ()
     spectrogram = np.asarray(frames)
     flux = np.diff(spectrogram, axis=0)
     onset = np.maximum(flux, 0.0).sum(axis=1)
     onset = np.concatenate(([onset[0]], onset))
+    threshold = float(np.median(onset) + 0.5 * np.std(onset))
+    peak_indices, _ = find_peaks(onset, height=threshold, distance=2)
+    onset_events = tuple(float(index * hop / sample_rate) for index in peak_indices)
     onset -= onset.mean()
 
     correlation = np.correlate(onset, onset, mode="full")[len(onset) - 1:]
@@ -383,5 +610,10 @@ def _pulse_clarity(samples: np.ndarray, sample_rate: int) -> float:
     min_lag = max(1, round(60 * frame_rate / 200))
     max_lag = min(len(correlation), round(60 * frame_rate / 50))
     if correlation[0] <= 0 or max_lag <= min_lag:
-        return 0.0
-    return max(0.0, min(1.0, float(np.max(correlation[min_lag:max_lag]) / correlation[0])))
+        return 0.0, onset_events
+    clarity = max(0.0, min(1.0, float(np.max(correlation[min_lag:max_lag]) / correlation[0])))
+    return clarity, onset_events
+
+
+def _pulse_clarity(samples: np.ndarray, sample_rate: int) -> float:
+    return _pulse_evidence(samples, sample_rate)[0]

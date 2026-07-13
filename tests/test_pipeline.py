@@ -35,12 +35,16 @@ def test_end_to_end_record_validates_and_serializes(tmp_path):
     path = tmp_path / "tone.wav"
     time = np.arange(44100 * 2) / 44100
     sf.write(path, 0.5 * np.sin(2 * np.pi * 196 * time), 44100, subtype="FLOAT")
-    record = analyze_file(path, detectors=FakeDetectors())
+    record = analyze_file(path, detectors=FakeDetectors(), emit_legacy_confidence=True)
     payload = json.loads(record.model_dump_json())
-    assert payload["schema_version"] == "1.1"
+    assert payload["schema_version"] == "1.2"
     assert payload["key"]["status"] == "detected"
     assert payload["tempo"]["status"] == "detected"
     assert payload["review_required"] is False
+    assert len(payload["key"]["top_k"]) == 3
+    assert len(payload["tempo"]["top_k"]) == 3
+    assert payload["key"]["signals"]["legacy_confidence"] is not None
+    assert payload["tempo"]["signals"]["legacy_confidence"] is not None
     assert payload["file"]["sha1"]
 
 
@@ -104,7 +108,11 @@ def test_keyfinder_temporary_file_is_pcm16(monkeypatch, tmp_path):
     monkeypatch.setattr(
         backends,
         "_run",
-        lambda command, backend: json.dumps(skey_probs) if backend == "S-KEY" else "C major",
+        lambda command, backend: (
+            json.dumps({"probabilities": skey_probs, "tiled": True})
+            if backend == "S-KEY"
+            else "C major"
+        ),
     )
 
     def fake_write(path, samples, sample_rate, subtype):
@@ -119,3 +127,14 @@ def test_keyfinder_temporary_file_is_pcm16(monkeypatch, tmp_path):
     assert captured["subtype"] == "PCM_16"
     assert len(evidence.votes) == 3
     assert evidence.votes[0].margin is None
+    assert "SKEY_INPUT_TILED" in evidence.flags
+
+    def unavailable_skey(command, backend):
+        if backend == "S-KEY":
+            raise backends.BackendUnavailable("synthetic failure")
+        return "C major"
+
+    monkeypatch.setattr(backends, "_run", unavailable_skey)
+    degraded = detectors.key_votes(audio)
+    assert len(degraded.votes) == 2
+    assert "SKEY_UNAVAILABLE" in degraded.flags

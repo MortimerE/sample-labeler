@@ -16,23 +16,30 @@ from .scoring import REVIEW_FLAGS
 
 def _degenerate(flags: list[str]) -> tuple[FieldResult, FieldResult]:
     signals = {"short_circuit": flags.copy()}
-    key = FieldResult("atonal", None, 0.0, signals, flags.copy())
-    tempo = FieldResult("tempoless", None, 0.0, signals, flags.copy())
+    key = FieldResult("atonal", None, 0.0, [], signals, flags.copy())
+    tempo = FieldResult("tempoless", None, 0.0, [], signals, flags.copy())
     return key, tempo
 
 
-def analyze_file(path: str | Path, config_path: str | Path | None = None, detectors: DetectorSuite | None = None) -> AnalysisRecord:
+def analyze_file(
+    path: str | Path,
+    config_path: str | Path | None = None,
+    detectors: DetectorSuite | None = None,
+    emit_legacy_confidence: bool = False,
+) -> AnalysisRecord:
     config = load_config(config_path)
     audio, context, file_flags = decode(path, config["preprocess"])
     suite = detectors or ProductionDetectors(
         essentia_margin_scale=float(config["key"].get("essentia_margin_scale", 2.0)),
         tonalness_uniform_floor=float(config["key"].get("tonalness_uniform_floor", 0.25)),
+        skey_min_seconds=float(config["skey"]["min_seconds"]),
+        bass_root_config=config["fusion"]["key"]["bass_root"],
     )
-    if "SILENT_FILE" in file_flags or "SHORT_FILE" in file_flags:
+    if "SILENT_FILE" in file_flags:
         key_result, tempo_result = _degenerate(file_flags)
     else:
-        key_analyzer = KeyEnsembleAnalyzer(suite, config["key"])
-        tempo_analyzer = TempoEnsembleAnalyzer(suite, config["tempo"])
+        key_analyzer = KeyEnsembleAnalyzer(suite, config, emit_legacy_confidence)
+        tempo_analyzer = TempoEnsembleAnalyzer(suite, config, emit_legacy_confidence)
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="autolabel") as executor:
             key_future = executor.submit(key_analyzer.analyze, audio, context)
             tempo_future = executor.submit(tempo_analyzer.analyze, audio, context)
@@ -59,6 +66,7 @@ def analyze_file(path: str | Path, config_path: str | Path | None = None, detect
             "status": key_result.status,
             "value": key_result.value,
             "confidence": key_result.confidence,
+            "top_k": key_result.top_k,
             "signals": key_result.signals,
             "flags": key_result.flags,
         },
@@ -66,10 +74,14 @@ def analyze_file(path: str | Path, config_path: str | Path | None = None, detect
             "status": tempo_result.status,
             "bpm": tempo_result.value,
             "confidence": tempo_result.confidence,
+            "top_k": tempo_result.top_k,
             "signals": tempo_result.signals,
             "flags": tempo_result.flags,
         },
-        "review_required": any(flag in REVIEW_FLAGS for flag in all_field_flags),
+        "review_required": (
+            key_result.status == "review"
+            or tempo_result.status == "review"
+            or any(flag in REVIEW_FLAGS for flag in all_field_flags)
+        ),
         "flags": file_flags,
     })
-

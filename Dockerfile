@@ -61,6 +61,7 @@ RUN python -m venv /opt/ml-venv \
 ENV SKEY_PYTHON=/opt/ml-venv/bin/python
 ENV SKEY_RUNNER=/app/scripts/skey_predict.py
 ENV SKEY_VERSION=${SKEY_VERSION}
+ENV SKEY_MIN_SECONDS=3.75
 ENV BEAT_THIS_PYTHON=/opt/ml-venv/bin/python
 ENV BEAT_THIS_RUNNER=/app/scripts/beat_this_predict.py
 ENV BEAT_THIS_VERSION=${BEAT_THIS_VERSION}

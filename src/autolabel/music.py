@@ -20,6 +20,8 @@ def relation(a: Key, b: Key) -> str | None:
         return "exact"
     if relative(a) == b:
         return "relative"
+    if a.pitch_class == b.pitch_class and a.mode != b.mode:
+        return "parallel"
     if a.mode == b.mode and (a.pitch_class - b.pitch_class) % 12 in (5, 7):
         return "fifth"
     return None
@@ -39,4 +41,3 @@ def key_dict(key: Key) -> dict[str, object]:
 
 def short_name(key: Key) -> str:
     return TONICS[key.pitch_class] + ("m" if key.mode == "minor" else "")
-

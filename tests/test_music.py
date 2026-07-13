@@ -35,6 +35,11 @@ def test_fifth_relation_requires_same_mode():
     assert relation(Key(0, "major"), Key(7, "minor")) is None
 
 
+def test_parallel_relation_requires_same_tonic_opposite_mode():
+    assert relation(Key(0, "major"), Key(0, "minor")) == "parallel"
+    assert relation(Key(0, "minor"), Key(0, "major")) == "parallel"
+
+
 def test_profile_candidates_expect_c_referenced_hpcp():
     c_referenced = np.zeros(12, dtype=float)
     c_referenced[9] = 1.4   # A

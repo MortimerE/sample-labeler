@@ -12,10 +12,11 @@ review outcomes are successful analyses rather than process errors.
 - concurrent key and tempo analyzer interfaces;
 - exact/relative/fifth key agreement, symmetric relative-key margin adjustment,
   majority/chroma mode resolution, Camelot rendering, and optional dual output;
-- metrical tempo reconciliation, confidence-gated bar-snap prior, pulse clarity,
-  and activation-flatness evidence;
-- configurable weighted confidence and calibrated abstention decisions;
-- strict schema 1.1 validation and the requested CLI shape;
+- log-linear posterior fusion over 24 key labels and a log-BPM grid, including
+  harmonic kernels, runner-up evidence, metrical folding, and a weak bar prior;
+- independent tonality/rhythmicity materiality axes, posterior-derived statuses,
+  and ranked top-k candidates even when a field is atonal or tempoless;
+- strict schema 1.2 validation plus isolated batch and Markdown/CSV report commands;
 - unit tests for scoring invariants plus end-to-end tests with deterministic
   detector doubles.
 
@@ -34,7 +35,15 @@ Run a production analysis after installing the native/model backends:
 ```bash
 autolabel analyze sample.wav --pretty
 autolabel analyze sample.wav --config my-config.yaml --out result.json
+autolabel batch inputs/ --out-dir results/
+autolabel report results/ --format md --out report.md
+autolabel report results/ --format csv --out report.csv
 ```
+
+`batch` writes one JSON record per supported audio file and isolates failures as
+`<stem>._error.json`; it exits non-zero only when every file fails. Use
+`--emit-legacy-confidence` with `analyze` or `batch` during the schema 1.2
+transition to retain the former weighted composite under `signals` for comparison.
 
 The CLI exits zero for `detected`, `review`, `atonal`, and `tempoless`; decode,
 backend, configuration, and schema failures are non-zero.
@@ -56,8 +65,9 @@ Defaults are in [`src/autolabel/default.yaml`](src/autolabel/default.yaml). A su
 is deep-merged over the defaults. Weight groups must sum to 1.0 and decision
 thresholds must be ordered.
 
-Every signal used by scoring is written to the record, allowing threshold and
-weight searches to run against saved results without decoding audio again.
+Every signal used by scoring, the full key posterior, and the extracted tempo
+lobes are written to the record, allowing offline analysis without decoding
+audio again.
 
 ## Calibration gate
 

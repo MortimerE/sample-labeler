@@ -29,12 +29,12 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
 
 
 def _validate(config: dict[str, Any]) -> None:
-    for section, expected in (("key", 1.0), ("tempo", 1.0)):
-        total = sum(float(v) for v in config[section]["weights"].values())
-        if abs(total - expected) > 1e-6:
-            raise ValueError(f"{section}.weights must sum to 1.0 (got {total})")
-    for section, low_name in (("key", "atonal"), ("tempo", "arhythmic")):
-        thresholds = config[section]["thresholds"]
-        if not 0 <= thresholds[low_name] < thresholds["accept"] <= 1:
-            raise ValueError(f"invalid {section} thresholds")
-
+    for name in ("tonality", "rhythmicity"):
+        total = sum(float(value) for value in config["axes"][name]["weights"].values())
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"axes.{name}.weights must sum to 1.0 (got {total})")
+    for name in ("key", "tempo"):
+        if any(float(value) <= 0 for value in config["fusion"][name]["reliability"].values()):
+            raise ValueError(f"fusion.{name}.reliability values must be positive")
+    if int(config["report"]["top_k"]) <= 0:
+        raise ValueError("report.top_k must be positive")
