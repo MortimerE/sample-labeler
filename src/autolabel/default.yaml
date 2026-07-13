@@ -37,6 +37,13 @@ fusion:
     lobe_separation: 0.06
     detect: {m1: 0.50, m1_related: 0.35, m12_related: 0.60}
   background: {k_short: 1.0, min_full_evidence_s: 4.0}
+  learned:
+    params_path: artifacts/fusion_params.npz
+    embedding: invariant_dft
+    gate: attention
+    key_loss: {eta: 4.0, ring: 0.55, overlap: 0.30, root: 0.15, expected_cost: 0.1}
+    tempo_loss: {bins: 72, sigma_bins: 1.0, three_two_weight: 0.15}
+    train: {lr: 0.0003, weight_decay: 0.01, batch: 64, voter_dropout: 0.15, epochs: 200, early_stop_patience: 20, seed: 7}
 axes:
   tonality:
     weights: {harmonic_ratio: 0.35, tonalness_h: 0.25, coherent_mass: 0.25, strength: 0.15}

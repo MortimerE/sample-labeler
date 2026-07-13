@@ -38,3 +38,12 @@ def _validate(config: dict[str, Any]) -> None:
             raise ValueError(f"fusion.{name}.reliability values must be positive")
     if int(config["report"]["top_k"]) <= 0:
         raise ValueError("report.top_k must be positive")
+    learned = config["fusion"].get("learned", {})
+    if learned:
+        if learned.get("gate") not in {"attention", "mlp"}:
+            raise ValueError("fusion.learned.gate must be attention or mlp")
+        if int(learned["tempo_loss"]["bins"]) <= 1:
+            raise ValueError("fusion.learned.tempo_loss.bins must exceed 1")
+        expected_cost = float(learned["key_loss"]["expected_cost"])
+        if not 0.0 <= expected_cost <= 0.2:
+            raise ValueError("fusion.learned.key_loss.expected_cost must be between 0 and 0.2")

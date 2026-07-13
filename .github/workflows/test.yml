@@ -21,6 +21,10 @@ jobs:
       - run: python scripts/generate_smoke_wav.py /tmp/sample-labeler-smoke.wav
       - run: docker build -t inbloom-sample-labeler:latest .
       - run: >-
+          docker run --rm --network=none --entrypoint /opt/ml-venv/bin/python
+          -e PYTHONPATH=/app/src:/app
+          inbloom-sample-labeler:latest scripts/check_fusion_parity.py
+      - run: >-
           docker run --rm --network=none
           -v /tmp/sample-labeler-smoke.wav:/inputs/smoke.wav:ro
           inbloom-sample-labeler:latest analyze /inputs/smoke.wav >/dev/null

@@ -69,6 +69,41 @@ Every signal used by scoring, the full key posterior, and the extracted tempo
 lobes are written to the record, allowing offline analysis without decoding
 audio again.
 
+## Learned fusion training
+
+Patch 5 optionally learns context-dependent reliability over the existing voter
+set. Runtime inference remains NumPy-only and falls back exactly to the hand
+fusion when `artifacts/fusion_params.npz` is absent. See
+[`docs/patch-5-learned-fusion.md`](docs/patch-5-learned-fusion.md) for the model,
+loss, augmentation, and validation contract.
+
+Training requires Torch/torchaudio and a source-indexed CSV:
+
+```bash
+pip install -r requirements-train.txt
+python -m train.train_fusion \
+  --samples /data/samples \
+  --index /data/labels.csv \
+  --out artifacts/fusion_params.npz
+```
+
+With the repository's long-running Compose container, put `labels.csv` beside
+the audio under `inputs/` and keep the full training stack inside the image:
+
+```bash
+docker compose exec analyzer /opt/ml-venv/bin/python -m train.train_fusion \
+  --samples /inputs \
+  --index /inputs/labels.csv \
+  --out /results/fusion_params.npz \
+  --cache /results/.fusion-cache
+```
+
+The default augmentation rotates all twelve roots, includes forward/reversed
+audio, and applies 0.9/1.0/1.1 pitch-preserving time stretches. The trainer
+refuses fewer than 150 distinct sources unless `--allow-small-dataset` is used,
+rejects source leakage across splits, and exports only when held-out task metrics
+meet the warm baseline without worse key calibration.
+
 ## Calibration gate
 
 Before calling M1 production-ready, collect 60–100 hand-labeled samples across

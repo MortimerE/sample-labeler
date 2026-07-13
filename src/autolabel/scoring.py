@@ -8,6 +8,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from .domain import FieldResult, Key
+from .learned_fusion import load_if_available, tempo_circle_likelihood
 from .music import key_dict, relation, relative, short_name
 
 REVIEW_FLAGS = {
@@ -222,6 +223,7 @@ def score_key(
     fusion = config["fusion"]["key"]
     likelihoods: list[np.ndarray] = []
     weights: list[float] = []
+    learned_identities: list[str] = []
     signal_votes: dict[str, Any] = {}
     skey_probabilities: np.ndarray | None = None
     essentia_strength = 0.0
@@ -233,6 +235,7 @@ def score_key(
         else:
             likelihood = point_voter_likelihood(vote, fusion)
         likelihoods.append(likelihood)
+        learned_identities.append(vote.detector)
         weight = float(fusion["reliability"][vote.detector])
         effective = 1.0
         if vote.detector == "skey" and "SKEY_INPUT_TILED" in evidence_flags:
@@ -251,11 +254,14 @@ def score_key(
         if vote.detector == "essentia":
             essentia_strength = clamp01(vote.strength)
             data["strength"] = essentia_strength
+        data["likelihood"] = [float(value) for value in likelihood]
         signal_votes[vote.detector] = data
     bass_config = fusion["bass_root"]
     bass_signal: dict[str, Any] | None = None
     if bass_root_histogram is not None:
-        likelihoods.append(bass_root_likelihood(bass_root_histogram, bass_config["kernel"]))
+        bass_likelihood = bass_root_likelihood(bass_root_histogram, bass_config["kernel"])
+        likelihoods.append(bass_likelihood)
+        learned_identities.append("bass_root")
         weights.append(float(bass_config["reliability"]) * clamp01(sub_prominence))
         effective_voters += 1.0
         bass_signal = {
@@ -263,6 +269,7 @@ def score_key(
             "sub_prominence": clamp01(sub_prominence),
             "sub_coverage": clamp01(sub_coverage),
             "segments": int(bass_segments),
+            "likelihood": [float(value) for value in bass_likelihood],
         }
     expected_weight = sum(float(value) for value in fusion["reliability"].values()) + float(bass_config["reliability"])
     active_weight = sum(weights)
@@ -273,7 +280,18 @@ def score_key(
         / float(background_config["min_full_evidence_s"]),
     )
     background_weight = max(0.0, expected_weight - active_weight) + shortness
-    posterior = temper_posterior(log_linear_pool(likelihoods, weights), active_weight, background_weight)
+    learned_config = config["fusion"].get("learned", {})
+    learned = load_if_available(str(learned_config.get("params_path", "")))
+    learned_weights: dict[str, float] | None = None
+    if learned is None:
+        pooled = log_linear_pool(likelihoods, weights)
+    else:
+        pooled, learned_weights = learned.pool(
+            "key", likelihoods, learned_identities, effective_voters,
+            (clamp01(tonalness), clamp01(harmonic_ratio)),
+            str(learned_config.get("gate", "attention")),
+        )
+    posterior = temper_posterior(pooled, active_weight, background_weight)
     order = np.argsort(posterior)[::-1]
     top1 = KEY_LABELS[int(order[0])]
     top2 = KEY_LABELS[int(order[1])]
@@ -334,6 +352,10 @@ def score_key(
         "harmonic_ratio": clamp01(harmonic_ratio),
         "n_effective_voters": effective_voters,
         "background_weight": background_weight,
+        "learned_fusion": {
+            "active": learned is not None,
+            "weights": learned_weights,
+        },
         "posterior": [float(value) for value in posterior],
         "posterior_entropy": entropy,
         "tonality": {**axis_values, "score": tonality_score},
@@ -584,6 +606,7 @@ def score_tempo(
     likelihoods: list[np.ndarray] = []
     weights: list[float] = []
     voter_likelihoods: list[np.ndarray] = []
+    learned_identities: list[str] = []
     sigma = fusion["sigma"]
 
     valid_hypotheses = [(float(bpm), max(0.0, float(probability))) for bpm, probability in evidence.tempocnn_hypotheses if bpm > 0]
@@ -594,6 +617,7 @@ def score_tempo(
             tempocnn += probability * log_gaussian(grid, bpm, float(sigma["tempocnn"]))
         likelihoods.append(_normalize(tempocnn))
         voter_likelihoods.append(likelihoods[-1])
+        learned_identities.append("tempocnn")
         weights.append(float(fusion["reliability"]["tempocnn"]))
 
     essentia_norm = clamp01(evidence.essentia_confidence / float(config["tempo"]["essentia_confidence_ceiling"]))
@@ -602,6 +626,7 @@ def score_tempo(
         essentia = log_gaussian(grid, float(evidence.essentia_bpm), essentia_sigma)
         likelihoods.append(essentia)
         voter_likelihoods.append(likelihoods[-1])
+        learned_identities.append("essentia")
         weights.append(float(fusion["reliability"]["essentia"]))
 
     beat_this_bpm = float(evidence.beat_this_bpm) if evidence.beat_this_bpm is not None else None
@@ -610,6 +635,7 @@ def score_tempo(
         beat = log_gaussian(grid, beat_this_bpm, beat_sigma)
         likelihoods.append(beat)
         voter_likelihoods.append(likelihoods[-1])
+        learned_identities.append("beat_this")
         weights.append(float(fusion["reliability"]["beat_this"]))
 
     if not likelihoods:
@@ -623,9 +649,20 @@ def score_tempo(
         / float(background_config["min_full_evidence_s"]),
     )
     background_weight = max(0.0, expected_weight - active_weight) + shortness
-    unadjusted_posterior = temper_posterior(
-        log_linear_pool(likelihoods, weights), active_weight, background_weight
-    )
+    circle_bins = int(config["fusion"].get("learned", {}).get("tempo_loss", {}).get("bins", 72))
+    circle_likelihoods = [tempo_circle_likelihood(grid, likelihood, circle_bins) for likelihood in likelihoods]
+    learned_config = config["fusion"].get("learned", {})
+    learned = load_if_available(str(learned_config.get("params_path", "")))
+    learned_weights: dict[str, float] | None = None
+    if learned is None:
+        pooled = log_linear_pool(likelihoods, weights)
+    else:
+        pooled, learned_weights = learned.pool(
+            "tempo", likelihoods, learned_identities, float(len(likelihoods)),
+            (clamp01(evidence.pulse_clarity), 1.0 - clamp01(evidence.activation_flatness)),
+            str(learned_config.get("gate", "attention")), circle_likelihoods,
+        )
+    unadjusted_posterior = temper_posterior(pooled, active_weight, background_weight)
     posterior = _normalize(
         unadjusted_posterior
         * _bar_snap_prior(grid, active_duration_s, config["tempo"]["bar_snap"])
@@ -752,11 +789,14 @@ def score_tempo(
         "n_effective_voters": float(len(likelihoods)),
         "background_weight": background_weight,
         "corroborating_voters": int(corroborating_voters),
+        "learned_fusion": {"active": learned is not None, "weights": learned_weights},
         "posterior_entropy": float(-np.sum(posterior * np.log(np.maximum(posterior, 1e-15))) / math.log(posterior.size)),
         "rhythmicity": {**axis_values, "score": rhythmicity_score},
         "pulse_clarity": axis_values["pulse_clarity"],
         "activation_flatness": clamp01(evidence.activation_flatness),
     }
+    for identity, circle in zip(learned_identities, circle_likelihoods):
+        signals[identity]["circle_likelihood"] = [float(value) for value in circle]
     if emit_legacy_confidence:
         signals["legacy_confidence"] = _legacy_tempo_confidence(evidence, octagree, essentia_norm)
     return FieldResult(status, bpm, m1, top_k, signals, list(dict.fromkeys(flags)))

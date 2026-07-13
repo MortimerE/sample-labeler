@@ -1,0 +1,3 @@
+path,source_id,key,bpm,atonal,tempoless,split
+bass-loop.wav,session-001-bass,Abm,174,false,false,train
+drum-loop.wav,session-002-drums,,174,true,false,val

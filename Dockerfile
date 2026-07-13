@@ -38,6 +38,8 @@ WORKDIR /app
 COPY pyproject.toml README.md requirements-analysis.txt ./
 COPY src ./src
 COPY scripts ./scripts
+COPY train ./train
+COPY artifacts ./local-artifacts
 
 RUN mkdir -p /app/artifacts /opt/torch-cache \
     && curl -fsSL "$TEMPOCNN_GRAPH_URL" -o /app/artifacts/deeptemp-k16-3.pb \
@@ -48,6 +50,14 @@ RUN mkdir -p /app/artifacts /opt/torch-cache \
     && echo "$BEAT_THIS_CKPT_SHA256  /app/artifacts/beat_this-final0.ckpt" | sha256sum -c - \
     && sha256sum /app/artifacts/* > /app/artifacts/SHA256SUMS
 
+RUN if [ -f /app/local-artifacts/fusion_params.npz ]; then \
+      cp /app/local-artifacts/fusion_params.npz /app/artifacts/fusion_params.npz; \
+      cp /app/local-artifacts/fusion_params.json /app/artifacts/fusion_params.json; \
+      sha256sum /app/artifacts/fusion_params.npz /app/artifacts/fusion_params.json \
+        >> /app/artifacts/SHA256SUMS; \
+    fi \
+    && rm -rf /app/local-artifacts
+
 RUN pip install --no-cache-dir "numpy>=1.26,<2" "Cython<3" "setuptools<70" \
     && pip install --no-cache-dir . \
     && pip install --no-cache-dir --no-build-isolation -r requirements-analysis.txt
@@ -56,7 +66,8 @@ RUN pip install --no-cache-dir "numpy>=1.26,<2" "Cython<3" "setuptools<70" \
 RUN python -m venv /opt/ml-venv \
     && /opt/ml-venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "torch==2.7.1" "torchaudio==2.7.1" \
     && /opt/ml-venv/bin/pip install --no-cache-dir "git+https://github.com/deezer/skey.git@${SKEY_REF}" \
-    && /opt/ml-venv/bin/pip install --no-cache-dir "beat-this==${BEAT_THIS_VERSION}"
+    && /opt/ml-venv/bin/pip install --no-cache-dir "beat-this==${BEAT_THIS_VERSION}" \
+    && /opt/ml-venv/bin/pip install --no-cache-dir -e .
 
 ENV SKEY_PYTHON=/opt/ml-venv/bin/python
 ENV SKEY_RUNNER=/app/scripts/skey_predict.py

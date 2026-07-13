@@ -5,10 +5,12 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.fusion-cache/
+artifacts/fusion_params.npz
+artifacts/fusion_params.json
 result.json
 
 inputs/*
 !inputs/.gitkeep
 results/*
 !results/.gitkeep
-
